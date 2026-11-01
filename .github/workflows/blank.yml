@@ -3,8 +3,9 @@ name: Build and Release APK
 on:
   push:
     tags:
-      - 'v*' # Triggers automatically when you push a tag starting with 'v' (e.g., v1.0.0)
-
+      - 'v*'
+  workflow_dispatch: # Adds a manual "Run workflow" button
+  
 jobs:
   build:
     name: Build APK and Upload to Release
