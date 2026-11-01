@@ -65,7 +65,6 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import android.webkit.WebView
@@ -75,25 +74,15 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import java.net.URLEncoder
 
-import com.google.firebase.auth.PhoneAuthProvider
-import com.google.firebase.auth.PhoneAuthOptions
-import com.google.firebase.auth.PhoneMultiFactorGenerator
-import java.util.concurrent.TimeUnit
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
-import androidx.core.net.toUri
 import androidx.fragment.app.FragmentActivity
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.firestore
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -107,8 +96,6 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.pow
-import kotlin.math.roundToInt
-import kotlin.time.Duration.Companion.seconds
 
 fun Context.getActivity(): Activity? {
     var currentContext = this
@@ -293,7 +280,6 @@ data class UserAppConfig(
     val hasSecondProperty: Boolean = false,
     val primaryRentWeekly: Double = 0.0,
     val secondaryRentWeekly: Double = 0.0,
-    val propertyManagementFeePercent: Double = 5.0,
     // Module Toggles
     val showTotalWealth: Boolean = true,
     val showCashFlow: Boolean = true,
@@ -345,7 +331,8 @@ data class CashflowItem(
     val name: String,
     val weeklyAmount: Double,
     val isLockedMortgageOrPropertyLink: Boolean = false,
-    val iconName: String = "Default"
+    val iconName: String = "Default",
+    val customSubtitle: String? = null
 )
 
 data class LoanConfig(
@@ -558,7 +545,6 @@ fun getElapsedFortnightsSinceStart(startDateStr: String): Int {
 // ============================================================================
 // MAIN APPLICATION COMPOSABLE
 // ============================================================================
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ExpenseTrackerApp(
     currentUser: FirebaseUser,
@@ -592,7 +578,6 @@ fun ExpenseTrackerApp(
             hasSecondProperty = sharedPrefs.getBoolean("has_second_property", false),
             primaryRentWeekly = sharedPrefs.getFloat("primary_rent_weekly", 0f).toDouble(),
             secondaryRentWeekly = sharedPrefs.getFloat("secondary_rent_weekly", 0f).toDouble(),
-            propertyManagementFeePercent = sharedPrefs.getFloat("property_management_fee_pct", 5f).toDouble(),
             showTotalWealth = sharedPrefs.getBoolean("mod_total_wealth", true),
             showCashFlow = sharedPrefs.getBoolean("mod_cash_flow", true),
             showProperties = sharedPrefs.getBoolean("mod_properties", true),
@@ -648,7 +633,6 @@ fun ExpenseTrackerApp(
             putBoolean("has_second_property", newConfig.hasSecondProperty)
             putFloat("primary_rent_weekly", newConfig.primaryRentWeekly.toFloat())
             putFloat("secondary_rent_weekly", newConfig.secondaryRentWeekly.toFloat())
-            putFloat("property_management_fee_pct", newConfig.propertyManagementFeePercent.toFloat())
             putBoolean("mod_total_wealth", newConfig.showTotalWealth)
             putBoolean("mod_cash_flow", newConfig.showCashFlow)
             putBoolean("mod_properties", newConfig.showProperties)
@@ -678,7 +662,6 @@ fun ExpenseTrackerApp(
             "hasSecondProperty" to newConfig.hasSecondProperty,
             "primaryRentWeekly" to newConfig.primaryRentWeekly,
             "secondaryRentWeekly" to newConfig.secondaryRentWeekly,
-            "propertyManagementFeePercent" to newConfig.propertyManagementFeePercent,
             "showTotalWealth" to newConfig.showTotalWealth,
             "showCashFlow" to newConfig.showCashFlow,
             "showProperties" to newConfig.showProperties,
@@ -917,7 +900,6 @@ fun ExpenseTrackerApp(
                     hasSecondProperty = cfgMap["hasSecondProperty"] as? Boolean ?: appConfig.hasSecondProperty,
                     primaryRentWeekly = (cfgMap["primaryRentWeekly"] as? Number)?.toDouble() ?: appConfig.primaryRentWeekly,
                     secondaryRentWeekly = (cfgMap["secondaryRentWeekly"] as? Number)?.toDouble() ?: appConfig.secondaryRentWeekly,
-                    propertyManagementFeePercent = (cfgMap["propertyManagementFeePercent"] as? Number)?.toDouble() ?: appConfig.propertyManagementFeePercent,
                     showTotalWealth = cfgMap["showTotalWealth"] as? Boolean ?: appConfig.showTotalWealth,
                     showCashFlow = cfgMap["showCashFlow"] as? Boolean ?: appConfig.showCashFlow,
                     showProperties = cfgMap["showProperties"] as? Boolean ?: appConfig.showProperties,
@@ -1155,13 +1137,13 @@ fun ExpenseTrackerApp(
     val currentSection = activeSections.getOrElse(pagerState.currentPage) { activeSections.first() }
 
     // Dynamic Mortgage Repayments
-    val prop1FortnightlyPmt = if (appConfig.showLoans) {
-        calculateFortnightlyRepayment(prop1Loan.originalLoanAmount, prop1Loan.interestRatePa)
-    } else 0.0
+    val p1LoanAmt = max(prop1Loan.originalLoanAmount, prop1Loan.startLoanBalance)
+    val prop1FortnightlyPmt = calculateFortnightlyRepayment(p1LoanAmt, prop1Loan.interestRatePa)
     val prop1WeeklyMortgage = -(prop1FortnightlyPmt / 2.0)
 
-    val prop2FortnightlyPmt = if (appConfig.showLoans && appConfig.hasSecondProperty) {
-        calculateFortnightlyRepayment(prop2Loan.originalLoanAmount, prop2Loan.interestRatePa)
+    val p2LoanAmt = max(prop2Loan.originalLoanAmount, prop2Loan.startLoanBalance)
+    val prop2FortnightlyPmt = if (appConfig.hasSecondProperty) {
+        calculateFortnightlyRepayment(p2LoanAmt, prop2Loan.interestRatePa)
     } else 0.0
     val prop2WeeklyMortgage = -(prop2FortnightlyPmt / 2.0)
 
@@ -1175,17 +1157,20 @@ fun ExpenseTrackerApp(
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
     val prop2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty) p2CurrentRow.closingBalance else 0.0
 
-    val netRent1 = appConfig.primaryRentWeekly * (1.0 - (appConfig.propertyManagementFeePercent / 100.0))
-    val prop1HousingCost = if (appConfig.isProperty1Rented) -netRent1 else prop1WeeklyMortgage
+    val prop1HousingCost = if (appConfig.isProperty1Rented) appConfig.primaryRentWeekly else prop1WeeklyMortgage
     val prop1NetWeekly = prop1HousingCost + prop1Items.sumOf { it.weeklyAmount }
 
-    val netRent2 = appConfig.secondaryRentWeekly * (1.0 - (appConfig.propertyManagementFeePercent / 100.0))
-    val prop2HousingCost = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) -netRent2 else prop2WeeklyMortgage
+    val prop2HousingCost = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) appConfig.secondaryRentWeekly else prop2WeeklyMortgage
     val prop2NetWeekly = if (appConfig.hasSecondProperty) (prop2HousingCost + prop2Items.sumOf { it.weeklyAmount }) else 0.0
 
-    val combinedPropertyNet = if (appConfig.showProperties || appConfig.isProperty1Rented) (prop1NetWeekly + prop2NetWeekly) else 0.0
+    val combinedPropertyNet = prop1NetWeekly + (if (appConfig.hasSecondProperty) prop2NetWeekly else 0.0)
     val splitDivisor = if (appConfig.isCoupleMode) 2.0 else 1.0
-    val perPersonPropertyShare = if (combinedPropertyNet < 0) combinedPropertyNet / splitDivisor else 0.0
+    val perPersonPropertyShare = combinedPropertyNet / splitDivisor
+
+    val p1NetStr = "${appConfig.property1Name}: ${formatCurrency(prop1NetWeekly, 2)}/wk"
+    val p2NetStr = if (appConfig.hasSecondProperty) " | ${appConfig.property2Name}: ${formatCurrency(prop2NetWeekly, 2)}/wk" else ""
+    val splitSummaryStr = if (appConfig.isCoupleMode) " (Net: ${formatCurrency(combinedPropertyNet, 2)}/wk ÷ 2)" else ""
+    val propertyBreakdownSummary = "$p1NetStr$p2NetStr$splitSummaryStr"
 
     // Hoisted What-If Simulation Controls & Milestone State (Shared globally with AI Assistant)
     var whatIfHorizonYears by rememberSaveable { mutableIntStateOf(15) }
@@ -1222,8 +1207,8 @@ fun ExpenseTrackerApp(
     val p2SurplusContext = if (appConfig.isCoupleMode) (person2Income + p2TotalExpensesContext) else 0.0
     val combinedSurplusContext = p1SurplusContext + p2SurplusContext
 
-    val p1ExpensesListStr = person1Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" }
-    val p2ExpensesListStr = if (appConfig.isCoupleMode) person2Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" } else ""
+    val p1ExpensesListStr = person1Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" }
+    val p2ExpensesListStr = if (appConfig.isCoupleMode) person2Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" } else ""
 
     // Compute What-If Projections for Global AI Context
     val whatIfTotalRateShockCost = run {
@@ -1255,7 +1240,7 @@ fun ExpenseTrackerApp(
         var currAssets = whatIfBaseAssets
         var currLiab = whatIfBaseLiabilities
         add(currNW)
-        for (y in 1..whatIfHorizonYears) {
+        for (i in 1..whatIfHorizonYears) {
             val annualSurplus = whatIfBaseSurplusWeekly * 52.0
             val assetGrowth = (sharesVal + superVal) * 0.075 + (prop1Val + prop2Val) * 0.04
             val debtPaydown = (currLiab * 0.035).coerceAtMost(currLiab)
@@ -1309,8 +1294,8 @@ fun ExpenseTrackerApp(
     val whatIfEndPathBNetWorth = whatIfPathBSeries.lastOrNull() ?: whatIfBaseNetWorth
     val whatIfNetDifference = whatIfEndPathBNetWorth - whatIfEndPathANetWorth
 
-    val prop1ItemsStr = prop1Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" }
-    val prop2ItemsStr = if (appConfig.hasSecondProperty) prop2Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" } else ""
+    val prop1ItemsStr = prop1Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" }
+    val prop2ItemsStr = if (appConfig.hasSecondProperty) prop2Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" } else ""
 
     val detailedFinancialContext = buildString {
         append("EXPLICIT COMPUTED FINANCIAL TOTALS & UNMASKED GLOBAL APP DATA (DO NOT RECALCULATE): ")
@@ -1319,11 +1304,11 @@ fun ExpenseTrackerApp(
         append("Exact Total Liabilities = ${formatCurrency(exactTotalLiabilities, 2)} (Property 1 Mortgage: ${formatCurrency(prop1LiveBalance, 0)}, Property 2 Mortgage: ${formatCurrency(prop2LiveBalance, 0)}). ")
 
         append("\n\n1. PERSONAL CASH FLOW TAB (UNMASKED): ")
-        append("User (${appConfig.person1Name}): Income = ${formatCurrency(person1Income, 2)}/wk, Total Expenses = ${formatCurrency(kotlin.math.abs(p1TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p1SurplusContext, 2)}/wk. ")
+        append("User (${appConfig.person1Name}): Income = ${formatCurrency(person1Income, 2)}/wk, Total Expenses = ${formatCurrency(abs(p1TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p1SurplusContext, 2)}/wk. ")
         if (p1ExpensesListStr.isNotBlank()) append("User Itemized Expenses: $p1ExpensesListStr. ")
 
         if (appConfig.isCoupleMode) {
-            append("Partner (${appConfig.person2Name}): Income = ${formatCurrency(person2Income, 2)}/wk, Total Expenses = ${formatCurrency(kotlin.math.abs(p2TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p2SurplusContext, 2)}/wk. ")
+            append("Partner (${appConfig.person2Name}): Income = ${formatCurrency(person2Income, 2)}/wk, Total Expenses = ${formatCurrency(abs(p2TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p2SurplusContext, 2)}/wk. ")
             if (p2ExpensesListStr.isNotBlank()) append("Partner Itemized Expenses: $p2ExpensesListStr. ")
             append("COMBINED WEEKLY NET SURPLUS = ${formatCurrency(combinedSurplusContext, 2)}/wk. ")
         }
@@ -1338,10 +1323,10 @@ fun ExpenseTrackerApp(
         }
 
         append("\n\n3. LOANS & OFFSET TAB (UNMASKED AMORTIZATION): ")
-        append("Property 1 Loan (${prop1Loan.name}): Original Loan = ${formatCurrency(prop1Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop1Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop1LiveBalance, 0)}, Interest Rate = ${prop1Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop1Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(kotlin.math.max(0.0, prop1LiveBalance - prop1Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop1FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(kotlin.math.abs(prop1WeeklyMortgage), 2)}. ")
+        append("Property 1 Loan (${prop1Loan.name}): Original Loan = ${formatCurrency(prop1Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop1Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop1LiveBalance, 0)}, Interest Rate = ${prop1Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop1Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(max(0.0, prop1LiveBalance - prop1Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop1FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(abs(prop1WeeklyMortgage), 2)}. ")
 
         if (appConfig.hasSecondProperty) {
-            append("Property 2 Loan (${prop2Loan.name}): Original Loan = ${formatCurrency(prop2Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop2Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop2LiveBalance, 0)}, Interest Rate = ${prop2Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop2Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(kotlin.math.max(0.0, prop2LiveBalance - prop2Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop2FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(kotlin.math.abs(prop2WeeklyMortgage), 2)}. ")
+            append("Property 2 Loan (${prop2Loan.name}): Original Loan = ${formatCurrency(prop2Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop2Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop2LiveBalance, 0)}, Interest Rate = ${prop2Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop2Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(max(0.0, prop2LiveBalance - prop2Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop2FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(abs(prop2WeeklyMortgage), 2)}. ")
         }
 
         append("\n\n4. SUPER & SHARES TAB (UNMASKED): ")
@@ -1360,11 +1345,11 @@ fun ExpenseTrackerApp(
         }
 
         append("\n\n6. WHAT-IF SCENARIO SIMULATOR (ACTIVE PROJECTIONS & FUTURE ENTRIES): ")
-        append("Active Timeframe = ${whatIfHorizonYears} Years. ")
-        append("Extra Weekly Savings/Spending = ${if (whatIfLifestyleAdjustmentWeekly >= 0) "+$" else "-$"}${kotlin.math.abs(whatIfLifestyleAdjustmentWeekly)}/wk. ")
-        append("Property 1 Rate Shock = +${whatIfRateShockProp1}%. ")
-        if (appConfig.hasSecondProperty) append("Property 2 Rate Shock = +${whatIfRateShockProp2}%. ")
-        if (whatIfRentalGrowthWeekly != 0f) append("Rental Growth = +$${whatIfRentalGrowthWeekly}/wk. ")
+        append("Active Timeframe = $whatIfHorizonYears Years. ")
+        append("Extra Weekly Savings/Spending = ${if (whatIfLifestyleAdjustmentWeekly >= 0) "+$" else "-$"}${abs(whatIfLifestyleAdjustmentWeekly)}/wk. ")
+        append("Property 1 Rate Shock = +$whatIfRateShockProp1%. ")
+        if (appConfig.hasSecondProperty) append("Property 2 Rate Shock = +$whatIfRateShockProp2%. ")
+        if (whatIfRentalGrowthWeekly != 0f) append("Rental Growth = +$$whatIfRentalGrowthWeekly/wk. ")
 
         val activeMilestones = whatIfMilestoneList.filter { it.isEnabled }
         val inactiveMilestones = whatIfMilestoneList.filter { !it.isEnabled }
@@ -1379,8 +1364,8 @@ fun ExpenseTrackerApp(
         }
 
         append("Simulated Projection Results (${whatIfHorizonYears} Years): ")
-        append("Path A (Status Quo Baseline Net Worth in ${whatIfHorizonYears} Yrs) = ${formatCurrency(whatIfEndPathANetWorth, 0)}. ")
-        append("Path B (Simulated Future Plan Net Worth in ${whatIfHorizonYears} Yrs) = ${formatCurrency(whatIfEndPathBNetWorth, 0)}. ")
+        append("Path A (Status Quo Baseline Net Worth in $whatIfHorizonYears Yrs) = ${formatCurrency(whatIfEndPathANetWorth, 0)}. ")
+        append("Path B (Simulated Future Plan Net Worth in $whatIfHorizonYears Yrs) = ${formatCurrency(whatIfEndPathBNetWorth, 0)}. ")
         append("Net Difference / Advantage = ${if (whatIfNetDifference >= 0) "+" else ""}${formatCurrency(whatIfNetDifference, 0)}. ")
         append("Cashflow Deficit Year = ${if (whatIfDeficitYear != null) "Year $whatIfDeficitYear (Cash reserves enter deficit)" else "None (Cash reserves positive)"}. ")
     }
@@ -1559,6 +1544,7 @@ fun ExpenseTrackerApp(
                                     }
                                 },
                                 perPersonPropertyShare = perPersonPropertyShare,
+                                propertyBreakdownSummary = propertyBreakdownSummary,
                                 person1Items = person1Items,
                                 person2Items = person2Items,
                                 onAddPerson1 = { name, amt, iconName ->
@@ -2093,8 +2079,10 @@ fun ExpenseTrackerApp(
                 val p2SurplusContext = if (appConfig.isCoupleMode) (person2Income + p2TotalExpensesContext) else 0.0
                 val combinedSurplusContext = p1SurplusContext + p2SurplusContext
 
-                val p1ExpensesListStr = person1Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" }
-                val p2ExpensesListStr = if (appConfig.isCoupleMode) person2Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" } else ""
+                val p1ExpensesListStr = person1Items.joinToString { "${it.name}: ${formatCurrency(
+                    abs(it.weeklyAmount), 2)}/wk" }
+                val p2ExpensesListStr = if (appConfig.isCoupleMode) person2Items.joinToString { "${it.name}: ${formatCurrency(
+                    abs(it.weeklyAmount), 2)}/wk" } else ""
 
                 // Compute What-If Projections for Global AI Context
                 val whatIfTotalRateShockCost = run {
@@ -2180,8 +2168,9 @@ fun ExpenseTrackerApp(
                 val whatIfEndPathBNetWorth = whatIfPathBSeries.lastOrNull() ?: whatIfBaseNetWorth
                 val whatIfNetDifference = whatIfEndPathBNetWorth - whatIfEndPathANetWorth
 
-                val prop1ItemsStr = prop1Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" }
-                val prop2ItemsStr = if (appConfig.hasSecondProperty) prop2Items.joinToString { "${it.name}: ${formatCurrency(kotlin.math.abs(it.weeklyAmount), 2)}/wk" } else ""
+                val prop1ItemsStr = prop1Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" }
+                val prop2ItemsStr = if (appConfig.hasSecondProperty) prop2Items.joinToString { "${it.name}: ${formatCurrency(
+                    abs(it.weeklyAmount), 2)}/wk" } else ""
 
                 val detailedFinancialContext = buildString {
                     append("EXPLICIT COMPUTED FINANCIAL TOTALS & UNMASKED GLOBAL APP DATA (DO NOT RECALCULATE): ")
@@ -2190,11 +2179,13 @@ fun ExpenseTrackerApp(
                     append("Exact Total Liabilities = ${formatCurrency(exactTotalLiabilities, 2)} (Property 1 Mortgage: ${formatCurrency(prop1LiveBalance, 0)}, Property 2 Mortgage: ${formatCurrency(prop2LiveBalance, 0)}). ")
 
                     append("\n\n1. PERSONAL CASH FLOW TAB (UNMASKED): ")
-                    append("User (${appConfig.person1Name}): Income = ${formatCurrency(person1Income, 2)}/wk, Total Expenses = ${formatCurrency(kotlin.math.abs(p1TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p1SurplusContext, 2)}/wk. ")
+                    append("User (${appConfig.person1Name}): Income = ${formatCurrency(person1Income, 2)}/wk, Total Expenses = ${formatCurrency(
+                        abs(p1TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p1SurplusContext, 2)}/wk. ")
                     if (p1ExpensesListStr.isNotBlank()) append("User Itemized Expenses: $p1ExpensesListStr. ")
 
                     if (appConfig.isCoupleMode) {
-                        append("Partner (${appConfig.person2Name}): Income = ${formatCurrency(person2Income, 2)}/wk, Total Expenses = ${formatCurrency(kotlin.math.abs(p2TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p2SurplusContext, 2)}/wk. ")
+                        append("Partner (${appConfig.person2Name}): Income = ${formatCurrency(person2Income, 2)}/wk, Total Expenses = ${formatCurrency(
+                            abs(p2TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p2SurplusContext, 2)}/wk. ")
                         if (p2ExpensesListStr.isNotBlank()) append("Partner Itemized Expenses: $p2ExpensesListStr. ")
                         append("COMBINED WEEKLY NET SURPLUS = ${formatCurrency(combinedSurplusContext, 2)}/wk. ")
                     }
@@ -2209,10 +2200,14 @@ fun ExpenseTrackerApp(
                     }
 
                     append("\n\n3. LOANS & OFFSET TAB (UNMASKED AMORTIZATION): ")
-                    append("Property 1 Loan (${prop1Loan.name}): Original Loan = ${formatCurrency(prop1Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop1Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop1LiveBalance, 0)}, Interest Rate = ${prop1Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop1Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(kotlin.math.max(0.0, prop1LiveBalance - prop1Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop1FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(kotlin.math.abs(prop1WeeklyMortgage), 2)}. ")
+                    append("Property 1 Loan (${prop1Loan.name}): Original Loan = ${formatCurrency(prop1Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop1Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop1LiveBalance, 0)}, Interest Rate = ${prop1Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop1Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(
+                        max(0.0, prop1LiveBalance - prop1Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop1FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(
+                        abs(prop1WeeklyMortgage), 2)}. ")
 
                     if (appConfig.hasSecondProperty) {
-                        append("Property 2 Loan (${prop2Loan.name}): Original Loan = ${formatCurrency(prop2Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop2Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop2LiveBalance, 0)}, Interest Rate = ${prop2Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop2Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(kotlin.math.max(0.0, prop2LiveBalance - prop2Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop2FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(kotlin.math.abs(prop2WeeklyMortgage), 2)}. ")
+                        append("Property 2 Loan (${prop2Loan.name}): Original Loan = ${formatCurrency(prop2Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop2Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop2LiveBalance, 0)}, Interest Rate = ${prop2Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop2Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(
+                            max(0.0, prop2LiveBalance - prop2Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop2FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(
+                            abs(prop2WeeklyMortgage), 2)}. ")
                     }
 
                     append("\n\n4. SUPER & SHARES TAB (UNMASKED): ")
@@ -2232,7 +2227,7 @@ fun ExpenseTrackerApp(
 
                     append("\n\n6. WHAT-IF SCENARIO SIMULATOR (ACTIVE PROJECTIONS & FUTURE ENTRIES): ")
                     append("Active Timeframe = ${whatIfHorizonYears} Years. ")
-                    append("Extra Weekly Savings/Spending Adjustment = ${if (whatIfLifestyleAdjustmentWeekly >= 0) "+$" else "-$"}${kotlin.math.abs(whatIfLifestyleAdjustmentWeekly)}/wk. ")
+                    append("Extra Weekly Savings/Spending Adjustment = ${if (whatIfLifestyleAdjustmentWeekly >= 0) "+$" else "-$"}${abs(whatIfLifestyleAdjustmentWeekly)}/wk. ")
                     append("Property 1 Rate Shock = +${whatIfRateShockProp1}%. ")
                     if (appConfig.hasSecondProperty) append("Property 2 Rate Shock = +${whatIfRateShockProp2}%. ")
                     if (whatIfRentalGrowthWeekly != 0f) append("Rental Income Growth = +$${whatIfRentalGrowthWeekly}/wk. ")
@@ -2431,7 +2426,6 @@ fun OnboardingSetupScreen(
     var prop1RateStr by rememberSaveable { mutableStateOf(initialProp1Rate.toString()) }
     var prop1OffsetStr by rememberSaveable { mutableStateOf(initialProp1Offset.toInt().toString()) }
     var prop1RentStr by rememberSaveable { mutableStateOf(initialPrimaryRent.toInt().toString()) }
-    var prop1MgmtFeeStr by rememberSaveable { mutableStateOf(initialConfig.propertyManagementFeePercent.toString()) }
 
     // Step 4: Super & Shares Quick-Setup
     val customShares = remember { mutableStateListOf<ShareParcel>() }
@@ -2763,17 +2757,6 @@ fun OnboardingSetupScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(12.dp)
                             )
-                            Spacer(Modifier.height(4.dp))
-                            OutlinedTextField(
-                                value = prop1MgmtFeeStr,
-                                onValueChange = { prop1MgmtFeeStr = it },
-                                label = { Text("Property Management Fee (%)") },
-                                placeholder = { Text("e.g. 5.0") },
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp)
-                            )
                         } else {
                             if (showProperties) {
                                 OutlinedTextField(
@@ -3006,7 +2989,6 @@ fun OnboardingSetupScreen(
                                 isProperty1Rented = isProperty1Rented,
                                 isProperty2Rented = isProperty2Rented,
                                 hasSecondProperty = hasSecondProperty,
-                                propertyManagementFeePercent = prop1MgmtFeeStr.toDoubleOrNull() ?: 5.0,
                                 showTotalWealth = finalShowWealth,
                                 showCashFlow = showCashFlow,
                                 showProperties = showProperties,
@@ -3769,43 +3751,7 @@ fun SettingsScreen(
             }
         }
 
-        item {
-            Card(
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                var showMgmtDialog by remember { mutableStateOf(false) }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Default Management Fee %", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text("Property manager commission deducted from rental income (${appConfig.propertyManagementFeePercent}%)", fontSize = 12.sp, color = SlateGray)
-                    }
-                    TextButton(onClick = { showMgmtDialog = true }) {
-                        Text("Edit Fee %", color = BrandCoralPink, fontWeight = FontWeight.Bold)
-                    }
-                }
 
-                if (showMgmtDialog) {
-                    EditSingleValueDialog(
-                        title = "Default Property Management Fee %",
-                        label = "Management Fee (%)",
-                        initialValue = appConfig.propertyManagementFeePercent,
-                        onDismiss = { showMgmtDialog = false },
-                        onConfirm = { newFee ->
-                            onUpdateAppConfig(appConfig.copy(propertyManagementFeePercent = newFee))
-                            showMgmtDialog = false
-                        }
-                    )
-                }
-            }
-        }
 
         item {
             Card(
@@ -3862,8 +3808,10 @@ fun EditUserProfileDialog(
     var p1Name by remember { mutableStateOf(config.person1Name) }
     var p2Name by remember { mutableStateOf(config.person2Name) }
     var prop1Name by remember { mutableStateOf(config.property1Name) }
+    var isProp1Rented by remember { mutableStateOf(config.isProperty1Rented) }
     var hasProp2 by remember { mutableStateOf(config.hasSecondProperty) }
     var prop2Name by remember { mutableStateOf(config.property2Name) }
+    var isProp2Rented by remember { mutableStateOf(config.isProperty2Rented) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3910,6 +3858,14 @@ fun EditUserProfileDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Text("Is Property 1 Rented?", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Switch(checked = isProp1Rented, onCheckedChange = { isProp1Rented = it })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text("Track 2nd Property?", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     Switch(checked = hasProp2, onCheckedChange = { hasProp2 = it })
                 }
@@ -3921,6 +3877,14 @@ fun EditUserProfileDialog(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Is Property 2 Rented / Investment?", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Switch(checked = isProp2Rented, onCheckedChange = { isProp2Rented = it })
+                    }
                 }
             }
         },
@@ -3933,8 +3897,10 @@ fun EditUserProfileDialog(
                             person1Name = p1Name.trim().ifBlank { "Me" },
                             person2Name = p2Name.trim().ifBlank { "Partner" },
                             property1Name = prop1Name.trim().ifBlank { "Primary Home" },
+                            isProperty1Rented = isProp1Rented,
                             hasSecondProperty = hasProp2,
-                            property2Name = prop2Name.trim().ifBlank { "Investment Property" }
+                            property2Name = prop2Name.trim().ifBlank { "Investment Property" },
+                            isProperty2Rented = isProp2Rented
                         )
                     )
                 },
@@ -4141,13 +4107,17 @@ fun MoneyPlanScreen(
             }
         }
 
-        val showHousingCostInCashflow = (appConfig.showProperties || appConfig.isProperty1Rented) && perPersonPropertyShare != 0.0
+        val showHousingCostInCashflow = perPersonPropertyShare != 0.0
         if (showHousingCostInCashflow) {
             item {
-                val shareLabel = if (appConfig.isProperty1Rented) {
-                    if (appConfig.isCoupleMode) "Rent & Housing Share (50% Split)" else "Weekly Rent & Housing Cost"
+                val shareLabel = if (perPersonPropertyShare >= 0) {
+                    if (appConfig.isCoupleMode) "Property Net Income Share (50% Split)" else "Net Property Cashflow Income"
                 } else {
-                    if (appConfig.isCoupleMode) "Property Share (50% Net Property Cost)" else "Net Property Housing Cost"
+                    if (appConfig.isProperty1Rented) {
+                        if (appConfig.isCoupleMode) "Rent & Housing Share (50% Split)" else "Weekly Rent & Housing Cost"
+                    } else {
+                        if (appConfig.isCoupleMode) "Property Share (50% Net Property Cost)" else "Net Property Housing Cost"
+                    }
                 }
                 ExpenseItemCard(
                     item = CashflowItem(
@@ -4157,7 +4127,7 @@ fun MoneyPlanScreen(
                         isLockedMortgageOrPropertyLink = true,
                         iconName = "Home"
                     ),
-                    accentColor = if (appConfig.isProperty1Rented) BrandCoralPink else BrandWarmAmber,
+                    accentColor = if (perPersonPropertyShare >= 0) BrandMintGreen else (if (appConfig.isProperty1Rented) BrandCoralPink else BrandWarmAmber),
                     isWealthHidden = isWealthHidden,
                     onDelete = null
                 )
@@ -4338,8 +4308,11 @@ fun PropertiesScreen(
 
 
 
-    val prop1Net = prop1WeeklyMortgage + prop1Items.sumOf { it.weeklyAmount }
-    val prop2Net = prop2WeeklyMortgage + prop2Items.sumOf { it.weeklyAmount }
+    val prop1HousingCost = if (appConfig.isProperty1Rented) appConfig.primaryRentWeekly else prop1WeeklyMortgage
+    val prop1Net = prop1HousingCost + prop1Items.sumOf { it.weeklyAmount }
+
+    val prop2HousingCost = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) appConfig.secondaryRentWeekly else prop2WeeklyMortgage
+    val prop2Net = if (appConfig.hasSecondProperty) (prop2HousingCost + prop2Items.sumOf { it.weeklyAmount }) else 0.0
 
     LazyColumn(
         modifier = Modifier
@@ -4381,141 +4354,235 @@ fun PropertiesScreen(
             val estVal = if (isProp1) prop1MarketValue else prop2MarketValue
             val liveBal = if (isProp1) prop1LoanBalance else prop2LoanBalance
             val netEquity = estVal - liveBal
-            val isRented = if (isProp1) appConfig.isProperty1Rented else appConfig.isProperty2Rented
 
-            if (isRented) {
-                var showRentEditDialog by remember { mutableStateOf(false) }
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                                    IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
-                                        Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+            var showRentEditDialog by remember { mutableStateOf(false) }
+            var showMgmtFeeDialog by remember { mutableStateOf(false) }
+            var showValuationDialog by remember { mutableStateOf(false) }
+
+            if (isProp1) {
+                val isRented = appConfig.isProperty1Rented
+                if (isRented) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
+                                            Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                                        }
                                     }
+                                    Text("Rental Summary (Primary Home)", fontSize = 12.sp, color = SlateGray)
                                 }
-                                Text("Rental Summary", fontSize = 12.sp, color = SlateGray)
-                            }
-                            IconButton(onClick = { showRentEditDialog = true }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit Rent", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
-                            }
-                        }
-
-                        var showMgmtFeeDialog by remember { mutableStateOf(false) }
-                        val currentRent = if (selectedProperty == 0) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
-
-                        LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandCoralPink)
-                        LoanDetailRow("Management Fee (${appConfig.propertyManagementFeePercent}%)", maskVal(currentRent * (appConfig.propertyManagementFeePercent / 100.0), 2), highlightColor = BrandWarmAmber)
-                        LoanDetailRow("Net Weekly Rent", maskVal(currentRent * (1.0 - appConfig.propertyManagementFeePercent / 100.0), 2), highlightColor = BrandMintGreen)
-
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { showMgmtFeeDialog = true }) {
-                                Text("Edit Mgmt Fee %", fontSize = 11.sp, color = BrandCoralPink)
-                            }
-                        }
-
-                        if (showMgmtFeeDialog) {
-                            EditSingleValueDialog(
-                                title = "Property Management Fee %",
-                                label = "Management Fee (%)",
-                                initialValue = appConfig.propertyManagementFeePercent,
-                                onDismiss = { showMgmtFeeDialog = false },
-                                onConfirm = { newFee ->
-                                    onUpdateAppConfig(appConfig.copy(propertyManagementFeePercent = newFee))
-                                    showMgmtFeeDialog = false
+                                IconButton(onClick = { showRentEditDialog = true }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit Rent", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
                                 }
-                            )
-                        }
+                            }
 
+                            val currentRent = appConfig.primaryRentWeekly
+                            LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = { showMgmtFeeDialog = true },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text("+ Add Mgmt Fee %", fontSize = 11.sp, color = BrandCoralPink)
+                                }
+                                OutlinedButton(
+                                    onClick = { showAddDialog = true },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text("+ Add Expense", fontSize = 11.sp, color = BrandMintGreen)
+                                }
+                            }
+                        }
                     }
-                }
-
-                if (showRentEditDialog) {
-                    val currentRent = if (selectedProperty == 0) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
-                    EditSingleValueDialog(
-                        title = "Update Weekly Rent",
-                        label = "Weekly Rent ($)",
-                        initialValue = currentRent,
-                        onDismiss = { showRentEditDialog = false },
-                        onConfirm = { newRent ->
-                            if (selectedProperty == 0) {
-                                onUpdateAppConfig(appConfig.copy(primaryRentWeekly = newRent))
-                            } else {
-                                onUpdateAppConfig(appConfig.copy(secondaryRentWeekly = newRent))
+                } else {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
+                                            Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                                        }
+                                    }
+                                    Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
+                                }
+                                IconButton(onClick = { showValuationDialog = true }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit Value", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
+                                }
                             }
-                            showRentEditDialog = false
+
+                            LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
+                            if (appConfig.showLoans) {
+                                LoanDetailRow("Synced Mortgage Balance", maskVal(liveBal, 0), highlightColor = BrandCoralPink)
+                            }
+                            LoanDetailRow("Calculated Net Equity", maskVal(netEquity, 0), highlightColor = BrandWarmAmber)
                         }
-                    )
+                    }
                 }
             } else {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                                    IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
-                                        Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                // Property 2: Investment Property — Show BOTH Valuation & Equity AND Rental Summary together in one unified view!
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
+                                            Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                                        }
                                     }
+                                    Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
                                 }
-                                Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
+                                IconButton(onClick = { showValuationDialog = true }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit Value", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
+                                }
                             }
-                            IconButton(onClick = { showValuationDialog = true }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit Value", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
+
+                            LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
+                            if (appConfig.showLoans) {
+                                LoanDetailRow("Synced Mortgage Balance", maskVal(liveBal, 0), highlightColor = BrandCoralPink)
+                            }
+                            LoanDetailRow("Calculated Net Equity", maskVal(netEquity, 0), highlightColor = BrandWarmAmber)
+                        }
+                    }
+
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Investment Rental Summary", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+                                    Text("Rental Income & Management", fontSize = 12.sp, color = SlateGray)
+                                }
+                                IconButton(onClick = { showRentEditDialog = true }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit Rent", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
+                                }
+                            }
+
+                            val currentRent = appConfig.secondaryRentWeekly
+                            LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
+
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = { showMgmtFeeDialog = true },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text("+ Add Mgmt Fee %", fontSize = 11.sp, color = BrandCoralPink)
+                                }
+                                OutlinedButton(
+                                    onClick = { showAddDialog = true },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text("+ Add Expense", fontSize = 11.sp, color = BrandMintGreen)
+                                }
                             }
                         }
-
-                        LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
-                        if (appConfig.showLoans) {
-                            LoanDetailRow("Synced Mortgage Balance", maskVal(liveBal, 0), highlightColor = BrandCoralPink)
-                        }
-                        LoanDetailRow("Calculated Net Equity", maskVal(netEquity, 0), highlightColor = BrandWarmAmber)
-
                     }
                 }
+            }
 
-                if (showValuationDialog) {
-                    LivePropertyPriceSyncDialog(
-                        propertyName = activePropName,
-                        currentValuation = estVal,
-                        onDismiss = { showValuationDialog = false },
-                        onSyncValuation = { newVal ->
-                            if (isProp1) onUpdatePropertyValuation(newVal, prop2MarketValue)
-                            else onUpdatePropertyValuation(prop1MarketValue, newVal)
-                            showValuationDialog = false
+            if (showRentEditDialog) {
+                val currentRent = if (isProp1) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
+                EditSingleValueDialog(
+                    title = "Update Weekly Rent",
+                    label = "Weekly Rent ($)",
+                    initialValue = currentRent,
+                    onDismiss = { showRentEditDialog = false },
+                    onConfirm = { newRent ->
+                        if (isProp1) {
+                            onUpdateAppConfig(appConfig.copy(primaryRentWeekly = newRent))
+                        } else {
+                            onUpdateAppConfig(appConfig.copy(secondaryRentWeekly = newRent))
                         }
-                    )
-                }
-                if (showAddressEditDialog) {
-                    EditAddressDialog(
-                        initialAddress = activePropName,
-                        onDismiss = { showAddressEditDialog = false },
-                        onConfirm = { newAddress ->
-                            if (isProp1) onUpdateAppConfig(appConfig.copy(property1Name = newAddress))
-                            else onUpdateAppConfig(appConfig.copy(property2Name = newAddress))
-                            showAddressEditDialog = false
+                        showRentEditDialog = false
+                    }
+                )
+            }
+
+            if (showMgmtFeeDialog) {
+                val currentRent = if (isProp1) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
+                ManagementFeePercentageDialog(
+                    weeklyRent = currentRent,
+                    onDismiss = { showMgmtFeeDialog = false },
+                    onConfirm = { name, amount ->
+                        if (isProp1) {
+                            onAddProp1(name, amount, "Utility")
+                        } else {
+                            onAddProp2(name, amount, "Utility")
                         }
-                    )
-                }
+                        showMgmtFeeDialog = false
+                    }
+                )
+            }
+
+            if (showValuationDialog) {
+                LivePropertyPriceSyncDialog(
+                    propertyName = activePropName,
+                    currentValuation = estVal,
+                    onDismiss = { showValuationDialog = false },
+                    onSyncValuation = { newVal ->
+                        if (isProp1) onUpdatePropertyValuation(newVal, prop2MarketValue)
+                        else onUpdatePropertyValuation(prop1MarketValue, newVal)
+                        showValuationDialog = false
+                    }
+                )
+            }
+
+            if (showAddressEditDialog) {
+                EditAddressDialog(
+                    initialAddress = activePropName,
+                    onDismiss = { showAddressEditDialog = false },
+                    onConfirm = { newAddress ->
+                        if (isProp1) onUpdateAppConfig(appConfig.copy(property1Name = newAddress))
+                        else onUpdateAppConfig(appConfig.copy(property2Name = newAddress))
+                        showAddressEditDialog = false
+                    }
+                )
             }
         }
 
@@ -4571,16 +4638,15 @@ fun PropertiesScreen(
             if (isRented) {
                 var showRentEditDialog by remember { mutableStateOf(false) }
                 val currentRent = if (isProp1) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
-                val netRent = currentRent * (1.0 - (appConfig.propertyManagementFeePercent / 100.0))
                 ExpenseItemCard(
                     item = CashflowItem(
                         id = "rent_sync",
-                        name = "Net Rent (after ${appConfig.propertyManagementFeePercent}% mgmt fee)",
-                        weeklyAmount = -netRent,
+                        name = "Weekly Gross Rent",
+                        weeklyAmount = currentRent,
                         isLockedMortgageOrPropertyLink = true,
                         iconName = "Home"
                     ),
-                    accentColor = BrandCoralPink,
+                    accentColor = BrandMintGreen,
                     isWealthHidden = isWealthHidden,
                     onEdit = { showRentEditDialog = true },
                     onDelete = null
@@ -5161,9 +5227,9 @@ fun WhatIfScenarioScreen(
 
     val p1Expenses = person1Items.sumOf { it.weeklyAmount }
     val p2Expenses = if (appConfig.isCoupleMode) person2Items.sumOf { it.weeklyAmount } else 0.0
-    val netWeeklyRent1 = appConfig.primaryRentWeekly * (1.0 - (appConfig.propertyManagementFeePercent / 100.0))
+    val netWeeklyRent1 = appConfig.primaryRentWeekly
     val prop1Housing = if (appConfig.isProperty1Rented) -netWeeklyRent1 else prop1WeeklyMortgage
-    val prop2Housing = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) 0.0 else prop2WeeklyMortgage
+    val prop2Housing = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) -appConfig.secondaryRentWeekly else prop2WeeklyMortgage
 
     val p1Surplus = person1Income + p1Expenses
     val p2Surplus = if (appConfig.isCoupleMode) (person2Income + p2Expenses) else 0.0
@@ -5528,7 +5594,7 @@ fun WhatIfScenarioScreen(
 
                                         val whatIfContextSummary = buildString {
                                             append("EXPLICIT COMPUTED WHAT-IF SIMULATION DATA (DO NOT RECALCULATE): ")
-                                            append("Time Horizon = ${horizonYears} Years. ")
+                                            append("Time Horizon = $horizonYears Years. ")
                                             append("Baseline Net Worth = ${formatCurrency(baseNetWorth, 2)}. ")
                                             append("Baseline Weekly Surplus = ${formatCurrency(baseSurplusWeekly, 2)}/wk. ")
                                             append("Baseline Projected Net Worth in ${horizonYears}Y (Path A) = ${formatCurrency(pathAEndNW, 2)}. ")
@@ -7238,7 +7304,15 @@ fun ExpenseItemCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    if (item.isLockedMortgageOrPropertyLink) {
+                    if (!item.customSubtitle.isNullOrBlank()) {
+                        Text(
+                            text = item.customSubtitle,
+                            fontSize = 11.sp,
+                            color = SlateGray,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else if (item.isLockedMortgageOrPropertyLink) {
                         Text(
                             text = "Auto-synced across Property & Loan modules",
                             fontSize = 11.sp,
@@ -7334,8 +7408,12 @@ fun AddCashflowDialog(
                     )
                 }
                 Text("Frequency (auto-converts to Weekly):", fontSize = 12.sp, color = SlateGray)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("Weekly", "Fortnight", "Monthly", "Quarterly", "Yearly").forEachIndexed { index, label ->
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    val frequencies = listOf("Weekly", "Fortnight", "Monthly", "Quarterly", "Yearly")
+                    itemsIndexed(frequencies) { index, label ->
                         FilterChip(
                             selected = frequency == index,
                             onClick = { frequency = index },
@@ -7790,6 +7868,51 @@ fun EditAddressDialog(
                 colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
             ) {
                 Text("Save Address", fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+fun ManagementFeePercentageDialog(
+    weeklyRent: Double,
+    onDismiss: () -> Unit,
+    onConfirm: (String, Double) -> Unit
+) {
+    var percentStr by remember { mutableStateOf("5.0") }
+    val pct = percentStr.toDoubleOrNull() ?: 5.0
+    val calculatedWeeklyFee = weeklyRent * (pct / 100.0)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Property Management Fee", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Weekly Gross Rent: ${formatCurrency(weeklyRent, 2)}/wk", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = BrandMintGreen)
+                OutlinedTextField(
+                    value = percentStr,
+                    onValueChange = { percentStr = it },
+                    label = { Text("Management Fee Percentage (%)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("Calculated Fee: ${formatCurrency(calculatedWeeklyFee, 2)}/wk (${pct}% of rent)", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (pct > 0) {
+                        onConfirm("Property Management Fee (${pct}%)", -calculatedWeeklyFee)
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
+            ) {
+                Text("Add Fee", fontWeight = FontWeight.ExtraBold)
             }
         },
         dismissButton = {
@@ -8449,7 +8572,7 @@ fun FloatingAiAssistantWidget(
                                     attachedBitmap = null
                                     isLoading = true
                                     coroutineScope.launch {
-                                        var reply = ""
+                                        var reply: String
                                         if (bitmapToSend != null) {
                                             val importedItems = AiAssistantManager.parsePearlerScreenshotWithAi(bitmapToSend)
                                             if (importedItems.isNotEmpty()) {
