@@ -34,6 +34,10 @@ jobs:
       - name: Create GitHub Release & Upload APK
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/debug/*.apk  # Matches your APK path (change to release if needed)
+          files: app/build/outputs/apk/debug/*.apk
+          tag_name: automated-build-${{ github.run_number }}  # Automatically creates a unique tag for manual runs
+          name: "Debug APK Build #${{ github.run_number }}"
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
