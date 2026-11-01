@@ -12,7 +12,7 @@ import org.json.JSONObject
 data class ImportedShareItem(
     val ticker: String,
     val quantity: Double,
-    val averagePrice: Double
+    val averagePrice: Double,
 )
 
 data class ChatMessage(

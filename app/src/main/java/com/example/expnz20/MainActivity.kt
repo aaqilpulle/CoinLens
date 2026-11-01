@@ -6333,8 +6333,15 @@ fun TotalWealthScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text("Asset Allocation", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                            TextButton(onClick = onNavigateToSettings) {
-                                Text("Customize Menus", fontSize = 12.sp, color = BrandCoralPink, fontWeight = FontWeight.Bold)
+                            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (appConfig.showWhatIf) {
+                                    TextButton(onClick = onNavigateToWhatIf) {
+                                        Text("Simulate", fontSize = 12.sp, color = BrandMintGreen, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                TextButton(onClick = onNavigateToSettings) {
+                                    Text("Customize", fontSize = 12.sp, color = BrandCoralPink, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                         Spacer(Modifier.height(8.dp))
