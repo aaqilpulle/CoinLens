@@ -7,7 +7,6 @@ import com.google.firebase.ai.type.content
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
-import org.json.JSONObject
 
 data class ImportedShareItem(
     val ticker: String,
@@ -17,22 +16,14 @@ data class ImportedShareItem(
 
 data class ChatMessage(
     val text: String,
-    val isFromUser: Boolean
-)
-
-data class ParsedTransaction(
-    val amount: Double,
-    val category: String,
-    val merchant: String,
-    val account: String,
-    val type: String // "expense" or "income"
+    val isFromUser: Boolean,
 )
 
 data class SubscriptionLeak(
     val merchant: String,
     val monthlyAmount: Double,
     val annualImpact: Double,
-    val category: String
+    val category: String,
 )
 
 fun cleanMarkdownText(raw: String): String {
@@ -77,38 +68,6 @@ object AiAssistantManager {
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext "Error communicating with Gemini AI: ${e.localizedMessage ?: "Unknown error"}"
-        }
-    }
-
-    // Parse Natural Language Quick-Log Transactions (Text-to-Transaction)
-    suspend fun parseQuickLogTransaction(input: String): ParsedTransaction? = withContext(Dispatchers.IO) {
-        try {
-            val aiModel = Firebase.ai.generativeModel("gemini-3.5-flash-lite")
-            val prompt = """
-                Analyze this natural language transaction statement: "$input".
-                Extract structured data and return ONLY a valid JSON object with these exact keys:
-                - "amount": number (e.g. 24.50)
-                - "category": string (e.g. "Food & Dining", "Groceries", "Transport", "Entertainment", "Utilities", "Shopping", "Income")
-                - "merchant": string (e.g. "Nando's")
-                - "account": string (e.g. "Debit", "Credit", "Savings")
-                - "type": string ("expense" or "income")
-                No markdown formatting, no backticks, just the raw JSON object.
-            """.trimIndent()
-
-            val response = aiModel.generateContent(prompt)
-            val rawText = response.text ?: return@withContext null
-            val cleanJson = rawText.replace("```json", "").replace("```", "").trim()
-            val obj = JSONObject(cleanJson)
-            return@withContext ParsedTransaction(
-                amount = obj.optDouble("amount", 0.0),
-                category = obj.optString("category", "General"),
-                merchant = obj.optString("merchant", "Unknown Merchant"),
-                account = obj.optString("account", "Debit"),
-                type = obj.optString("type", "expense")
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return@withContext null
         }
     }
 

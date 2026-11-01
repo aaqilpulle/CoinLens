@@ -2431,6 +2431,7 @@ fun OnboardingSetupScreen(
     var prop1RateStr by rememberSaveable { mutableStateOf(initialProp1Rate.toString()) }
     var prop1OffsetStr by rememberSaveable { mutableStateOf(initialProp1Offset.toInt().toString()) }
     var prop1RentStr by rememberSaveable { mutableStateOf(initialPrimaryRent.toInt().toString()) }
+    var prop1MgmtFeeStr by rememberSaveable { mutableStateOf(initialConfig.propertyManagementFeePercent.toString()) }
 
     // Step 4: Super & Shares Quick-Setup
     val customShares = remember { mutableStateListOf<ShareParcel>() }
@@ -2762,6 +2763,17 @@ fun OnboardingSetupScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(12.dp)
                             )
+                            Spacer(Modifier.height(4.dp))
+                            OutlinedTextField(
+                                value = prop1MgmtFeeStr,
+                                onValueChange = { prop1MgmtFeeStr = it },
+                                label = { Text("Property Management Fee (%)") },
+                                placeholder = { Text("e.g. 5.0") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp)
+                            )
                         } else {
                             if (showProperties) {
                                 OutlinedTextField(
@@ -2994,6 +3006,7 @@ fun OnboardingSetupScreen(
                                 isProperty1Rented = isProperty1Rented,
                                 isProperty2Rented = isProperty2Rented,
                                 hasSecondProperty = hasSecondProperty,
+                                propertyManagementFeePercent = prop1MgmtFeeStr.toDoubleOrNull() ?: 5.0,
                                 showTotalWealth = finalShowWealth,
                                 showCashFlow = showCashFlow,
                                 showProperties = showProperties,
@@ -3751,6 +3764,44 @@ fun SettingsScreen(
                             }
                         },
                         colors = SwitchDefaults.colors(checkedThumbColor = BrandMintGreen, checkedTrackColor = BrandMintGreen.copy(alpha = 0.5f))
+                    )
+                }
+            }
+        }
+
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                var showMgmtDialog by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Default Management Fee %", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+                        Text("Property manager commission deducted from rental income (${appConfig.propertyManagementFeePercent}%)", fontSize = 12.sp, color = SlateGray)
+                    }
+                    TextButton(onClick = { showMgmtDialog = true }) {
+                        Text("Edit Fee %", color = BrandCoralPink, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                if (showMgmtDialog) {
+                    EditSingleValueDialog(
+                        title = "Default Property Management Fee %",
+                        label = "Management Fee (%)",
+                        initialValue = appConfig.propertyManagementFeePercent,
+                        onDismiss = { showMgmtDialog = false },
+                        onConfirm = { newFee ->
+                            onUpdateAppConfig(appConfig.copy(propertyManagementFeePercent = newFee))
+                            showMgmtDialog = false
+                        }
                     )
                 }
             }
@@ -7739,48 +7790,6 @@ fun EditAddressDialog(
                 colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
             ) {
                 Text("Save Address", fontWeight = FontWeight.ExtraBold)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
-
-@Composable
-fun EditPropertyValuationDialog(
-    propertyName: String,
-    currentValuation: Double,
-    onDismiss: () -> Unit,
-    onConfirm: (Double) -> Unit
-) {
-    var valStr by remember { mutableStateOf(if (currentValuation == 0.0) "" else currentValuation.toInt().toString()) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Update $propertyName Valuation", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Enter the estimated market value for $propertyName:", fontSize = 12.sp, color = SlateGray)
-                OutlinedTextField(
-                    value = valStr,
-                    onValueChange = { valStr = it },
-                    label = { Text("Market Value ($)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    val v = valStr.toDoubleOrNull() ?: 0.0
-                    if (v >= 0) onConfirm(v)
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
-            ) {
-                Text("Update Valuation", fontWeight = FontWeight.ExtraBold)
             }
         },
         dismissButton = {
