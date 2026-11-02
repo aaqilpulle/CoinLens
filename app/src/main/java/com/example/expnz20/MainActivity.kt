@@ -95,9 +95,18 @@ import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawOutline
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.sin
 
 fun Context.getActivity(): Activity? {
     var currentContext = this
@@ -137,6 +146,333 @@ val UserColorPalette = listOf(
 )
 
 val LocalIsDarkTheme = staticCompositionLocalOf { true }
+
+// ============================================================================
+// APPLE-INSPIRED LIQUID GLASS DESIGN ENGINE (GLOBAL REFRACTION, MENISCUS & RIM)
+// ============================================================================
+@Composable
+fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
+    val infiniteTransition = rememberInfiniteTransition(label = "liquid_glass_ambient")
+    val phase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = (2f * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 22000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "orb_phase"
+    )
+
+    val baseBg = if (isDarkMode) BrandForestDark else Color(0xFFEAF4F1)
+
+    Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(baseBg)
+    ) {
+        val w = size.width
+        val h = size.height
+        val maxDim = max(w, h)
+
+        // Orb 1: Coral Rose refractive bloom (top-left drifting)
+        val c1 = Offset(
+            x = w * (0.20f + 0.14f * cos(phase)),
+            y = h * (0.16f + 0.10f * sin(phase))
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    BrandCoralPink.copy(alpha = if (isDarkMode) 0.30f else 0.24f),
+                    BrandCoralPink.copy(alpha = if (isDarkMode) 0.08f else 0.06f),
+                    Color.Transparent
+                ),
+                center = c1,
+                radius = maxDim * 0.56f
+            ),
+            radius = maxDim * 0.56f,
+            center = c1
+        )
+
+        // Orb 2: Mint Emerald caustic glow (mid-right drifting)
+        val c2 = Offset(
+            x = w * (0.82f + 0.12f * sin(phase * 0.85f)),
+            y = h * (0.44f + 0.14f * cos(phase * 0.85f))
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    BrandMintGreen.copy(alpha = if (isDarkMode) 0.24f else 0.20f),
+                    BrandSkyBlue.copy(alpha = if (isDarkMode) 0.08f else 0.06f),
+                    Color.Transparent
+                ),
+                center = c2,
+                radius = maxDim * 0.54f
+            ),
+            radius = maxDim * 0.54f,
+            center = c2
+        )
+
+        // Orb 3: Sky Blue & Lavender deep liquid refraction (bottom-left drifting)
+        val c3 = Offset(
+            x = w * (0.26f + 0.15f * sin(phase + 1.4f)),
+            y = h * (0.82f + 0.10f * cos(phase + 1.4f))
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    BrandSkyBlue.copy(alpha = if (isDarkMode) 0.22f else 0.18f),
+                    BrandPurple.copy(alpha = if (isDarkMode) 0.10f else 0.07f),
+                    Color.Transparent
+                ),
+                center = c3,
+                radius = maxDim * 0.58f
+            ),
+            radius = maxDim * 0.58f,
+            center = c3
+        )
+
+        // Orb 4: Warm Gold subtle prism highlight (bottom-right drifting)
+        val c4 = Offset(
+            x = w * (0.76f + 0.10f * cos(phase * 1.15f)),
+            y = h * (0.86f + 0.08f * sin(phase * 1.15f))
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    BrandWarmAmber.copy(alpha = if (isDarkMode) 0.16f else 0.14f),
+                    Color.Transparent
+                ),
+                center = c4,
+                radius = maxDim * 0.44f
+            ),
+            radius = maxDim * 0.44f,
+            center = c4
+        )
+    }
+}
+
+fun Modifier.liquidGlass(
+    shape: Shape = RoundedCornerShape(22.dp),
+    tintColor: Color = BrandForestSurface,
+    intensity: Float = 1f,
+    accentRimColor: Color = BrandCoralPink
+): Modifier = this
+    .clip(shape)
+    .drawWithCache {
+        val outline = shape.createOutline(size, layoutDirection, this)
+        val safeIntensity = intensity.coerceIn(0.35f, 1.5f)
+        val strokePx = 1.25.dp.toPx()
+
+        // 1. Multi-stop diagonal refractive frost fill
+        val baseFrostBrush = Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = (0.22f * safeIntensity).coerceIn(0f, 0.55f)),
+                tintColor.copy(alpha = (0.58f * safeIntensity).coerceIn(0f, 0.85f)),
+                tintColor.copy(alpha = (0.44f * safeIntensity).coerceIn(0f, 0.78f)),
+                Color.White.copy(alpha = (0.10f * safeIntensity).coerceIn(0f, 0.35f))
+            ),
+            start = Offset.Zero,
+            end = Offset(size.width, size.height)
+        )
+
+        // 2. Top curved liquid meniscus highlight (Apple iOS 26 lens curvature)
+        val meniscusBrush = Brush.verticalGradient(
+            colors = listOf(
+                Color.White.copy(alpha = (0.34f * safeIntensity).coerceIn(0f, 0.65f)),
+                Color.White.copy(alpha = (0.08f * safeIntensity).coerceIn(0f, 0.25f)),
+                Color.Transparent
+            ),
+            startY = 0f,
+            endY = (size.height * 0.42f).coerceAtLeast(1f)
+        )
+
+        // 3. Subtle diagonal specular sheen across glass face
+        val sheenBrush = Brush.linearGradient(
+            colors = listOf(
+                Color.Transparent,
+                Color.White.copy(alpha = (0.07f * safeIntensity).coerceIn(0f, 0.22f)),
+                Color.Transparent
+            ),
+            start = Offset(size.width * 0.15f, 0f),
+            end = Offset(size.width * 0.85f, size.height)
+        )
+
+        // 4. Anisotropic 3D specular rim (bright pearl top-left -> soft mid -> luminous accent bottom-right)
+        val rimBrush = Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = (0.68f * safeIntensity).coerceIn(0f, 0.92f)),
+                Color.White.copy(alpha = (0.16f * safeIntensity).coerceIn(0f, 0.45f)),
+                accentRimColor.copy(alpha = (0.48f * safeIntensity).coerceIn(0f, 0.85f)),
+                Color.White.copy(alpha = (0.38f * safeIntensity).coerceIn(0f, 0.75f))
+            ),
+            start = Offset.Zero,
+            end = Offset(size.width, size.height)
+        )
+
+        onDrawWithContent {
+            drawOutline(outline = outline, brush = baseFrostBrush)
+            drawOutline(outline = outline, brush = meniscusBrush)
+            drawOutline(outline = outline, brush = sheenBrush)
+            drawContent()
+            drawOutline(
+                outline = outline,
+                brush = rimBrush,
+                style = Stroke(width = strokePx)
+            )
+        }
+    }
+
+// Global package-level Liquid Glass Card & AlertDialog wrappers
+// Automatically upgrades every Card and AlertDialog across all tabs in the app!
+@Composable
+fun Card(
+    modifier: Modifier = Modifier,
+    shape: Shape = CardDefaults.shape,
+    colors: CardColors = CardDefaults.cardColors(),
+    elevation: CardElevation = CardDefaults.cardElevation(),
+    border: BorderStroke? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val isDark = LocalIsDarkTheme.current
+    val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
+        colors.containerColor
+    } else if (isDark) {
+        BrandForestSurface
+    } else {
+        Color.White
+    }
+    val rimAccent = border?.brush?.let { brush ->
+        if (brush is SolidColor) brush.value else BrandCoralPink
+    } ?: if (isDark) BrandCoralPink else BrandMintGreen
+
+    // Keep elevation parameter referenced for zero unused-parameter warnings,
+    // while passing 0.dp to Material3 Card so Android does NOT draw a washed-out white tonal rectangle inside the glass orb!
+    val zeroElevation = if (elevation == CardDefaults.cardElevation()) {
+        CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
+    } else {
+        CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
+    }
+
+    androidx.compose.material3.Card(
+        modifier = modifier
+            .liquidGlass(
+                shape = shape,
+                tintColor = glassBaseTint,
+                intensity = if (isDark) 0.96f else 1.12f,
+                accentRimColor = rimAccent
+            ),
+        shape = shape,
+        colors = CardDefaults.cardColors(
+            containerColor = Color.Transparent,
+            contentColor = if (colors.contentColor != Color.Unspecified) colors.contentColor else if (isDark) Color.White else BrandForestDark
+        ),
+        elevation = zeroElevation,
+        border = border,
+        content = content
+    )
+}
+
+@Composable
+fun Card(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape = CardDefaults.shape,
+    colors: CardColors = CardDefaults.cardColors(),
+    elevation: CardElevation = CardDefaults.cardElevation(),
+    border: BorderStroke? = null,
+    interactionSource: MutableInteractionSource? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    val isDark = LocalIsDarkTheme.current
+    val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
+        colors.containerColor
+    } else if (isDark) {
+        BrandForestSurface
+    } else {
+        Color.White
+    }
+    val rimAccent = border?.brush?.let { brush ->
+        if (brush is SolidColor) brush.value else BrandCoralPink
+    } ?: if (isDark) BrandCoralPink else BrandMintGreen
+
+    val zeroElevation = if (elevation == CardDefaults.cardElevation()) {
+        CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
+    } else {
+        CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
+    }
+
+    androidx.compose.material3.Card(
+        onClick = onClick,
+        modifier = modifier
+            .liquidGlass(
+                shape = shape,
+                tintColor = glassBaseTint,
+                intensity = if (isDark) 0.96f else 1.12f,
+                accentRimColor = rimAccent
+            ),
+        enabled = enabled,
+        shape = shape,
+        colors = CardDefaults.cardColors(
+            containerColor = Color.Transparent,
+            contentColor = if (colors.contentColor != Color.Unspecified) colors.contentColor else if (isDark) Color.White else BrandForestDark
+        ),
+        elevation = zeroElevation,
+        border = border,
+        interactionSource = interactionSource,
+        content = content
+    )
+}
+
+@Composable
+fun AlertDialog(
+    onDismissRequest: () -> Unit,
+    confirmButton: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    dismissButton: @Composable (() -> Unit)? = null,
+    icon: @Composable (() -> Unit)? = null,
+    title: @Composable (() -> Unit)? = null,
+    text: @Composable (() -> Unit)? = null,
+    shape: Shape = RoundedCornerShape(28.dp),
+    containerColor: Color = Color.Unspecified,
+    iconContentColor: Color = AlertDialogDefaults.iconContentColor,
+    titleContentColor: Color = Color.Unspecified,
+    textContentColor: Color = Color.Unspecified,
+    tonalElevation: Dp = 0.dp,
+    properties: DialogProperties = DialogProperties()
+) {
+    val isDark = LocalIsDarkTheme.current
+    val baseGlass = if (containerColor != Color.Unspecified && containerColor != Color.Transparent) {
+        containerColor.copy(alpha = 0.88f)
+    } else if (isDark) {
+        BrandForestDark.copy(alpha = 0.88f)
+    } else {
+        Color.White.copy(alpha = 0.90f)
+    }
+    val zeroTonalElevation = if (tonalElevation > 0.dp) 0.dp else 0.dp
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = confirmButton,
+        modifier = modifier
+            .liquidGlass(
+                shape = shape,
+                tintColor = baseGlass,
+                intensity = 1.18f,
+                accentRimColor = BrandCoralPink
+            ),
+        dismissButton = dismissButton,
+        icon = icon,
+        title = title,
+        text = text,
+        shape = shape,
+        containerColor = Color.Transparent,
+        iconContentColor = iconContentColor,
+        titleContentColor = if (titleContentColor != Color.Unspecified) titleContentColor else if (isDark) Color.White else BrandForestDark,
+        textContentColor = if (textContentColor != Color.Unspecified) textContentColor else if (isDark) Color.White.copy(alpha = 0.92f) else BrandForestDark.copy(alpha = 0.90f),
+        tonalElevation = zeroTonalElevation,
+        properties = properties
+    )
+}
 
 // ============================================================================
 // CUSTOM VECTOR APP LOGO COMPOSABLE (MATCHES UPLOADED WALLET + ARROW IMAGE)
@@ -399,11 +735,11 @@ class MainActivity : FragmentActivity() {
                     secondary = BrandMintGreen,
                     tertiary = BrandWarmAmber,
                     error = BrandCoralRed,
-                    background = BrandForestDark,
-                    surface = BrandForestSurface,
+                    background = Color.Transparent,
+                    surface = BrandForestSurface.copy(alpha = 0.48f),
                     onBackground = Color.White,
                     onSurface = Color.White,
-                    surfaceVariant = BrandForestVariant,
+                    surfaceVariant = BrandForestVariant.copy(alpha = 0.42f),
                     onSurfaceVariant = Color.White
                 )
             } else {
@@ -413,41 +749,46 @@ class MainActivity : FragmentActivity() {
                     secondary = BrandCoralPink,
                     tertiary = BrandWarmAmber,
                     error = BrandCoralRed,
-                    background = Color(0xFFF2F7F5),
-                    surface = Color(0xFFFFFFFF),
+                    background = Color.Transparent,
+                    surface = Color.White.copy(alpha = 0.62f),
                     onBackground = BrandForestDark,
                     onSurface = BrandForestDark,
-                    surfaceVariant = BrandForestSurface,
-                    onSurfaceVariant = Color.White
+                    surfaceVariant = Color(0xFFDCECE7).copy(alpha = 0.56f),
+                    onSurfaceVariant = BrandForestDark
                 )
             }
 
             CompositionLocalProvider(LocalIsDarkTheme provides isDarkMode) {
                 MaterialTheme(colorScheme = colorScheme) {
-                    Surface(
-                        modifier = Modifier.fillMaxSize(),
-                        color = MaterialTheme.colorScheme.background
-                    ) {
-                        if (currentUser == null) {
-                            LoginScreen(
-                                onLoginSuccess = { user -> currentUser = user }
-                            )
-                        } else {
-                            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                                val isExpanded = maxWidth > 600.dp
-                                ExpenseTrackerApp(
-                                    currentUser = currentUser!!,
-                                    onSignOutUser = {
-                                        auth.signOut()
-                                        currentUser = null
-                                    },
-                                    isExpanded = isExpanded,
-                                    isDarkMode = isDarkMode,
-                                    onDarkModeChange = { newMode ->
-                                        isDarkMode = newMode
-                                        sharedPrefs.edit { putBoolean("dark_mode", newMode) }
-                                    }
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        // Global animated multi-orb ambient refraction canvas behind the entire app
+                        LiquidGlassAmbientBackground(isDarkMode = isDarkMode)
+
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            color = Color.Transparent
+                        ) {
+                            if (currentUser == null) {
+                                LoginScreen(
+                                    onLoginSuccess = { user -> currentUser = user }
                                 )
+                            } else {
+                                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                                    val isExpanded = maxWidth > 600.dp
+                                    ExpenseTrackerApp(
+                                        currentUser = currentUser!!,
+                                        onSignOutUser = {
+                                            auth.signOut()
+                                            currentUser = null
+                                        },
+                                        isExpanded = isExpanded,
+                                        isDarkMode = isDarkMode,
+                                        onDarkModeChange = { newMode ->
+                                            isDarkMode = newMode
+                                            sharedPrefs.edit { putBoolean("dark_mode", newMode) }
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -1892,61 +2233,82 @@ fun ExpenseTrackerApp(
         }
     }
 
-    // HEADER WITH BRAND LOGO
+    // HEADER WITH BRAND LOGO — FLOATING APPLE LIQUID GLASS CAPSULE
     val topBarContent = @Composable {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = BrandForestDark.copy(alpha = 0.92f),
-            border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.22f)),
-            tonalElevation = 8.dp
+        val headerGlassShape = RoundedCornerShape(26.dp)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 6.dp)
         ) {
-            Row(
+            Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(top = 10.dp, bottom = 12.dp, start = 16.dp, end = 16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .liquidGlass(
+                        shape = headerGlassShape,
+                        tintColor = BrandForestDark,
+                        intensity = 1.15f,
+                        accentRimColor = currentSection.getColor(appConfig)
+                    ),
+                shape = headerGlassShape,
+                color = Color.Transparent,
+                tonalElevation = 0.dp
             ) {
                 Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 10.dp, start = 14.dp, end = 14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    AppLogoIcon(size = 40.dp)
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = headerSubtitle,
-                            color = BrandCoralPink,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            letterSpacing = 1.2.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = if (currentSection == AppSection.PROPERTIES) propertiesSectionTitle else currentSection.title,
-                            color = Color.White,
-                            fontSize = 19.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        shape = CircleShape,
-                        color = Color.White.copy(alpha = 0.12f),
-                        modifier = Modifier.size(40.dp)
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        IconButton(onClick = { isWealthHidden = !isWealthHidden }) {
-                            Icon(
-                                if (isWealthHidden) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = "Toggle Privacy Mask",
-                                tint = if (isWealthHidden) BrandCoralPink else Color.White,
-                                modifier = Modifier.size(20.dp)
+                        AppLogoIcon(size = 40.dp)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = headerSubtitle,
+                                color = BrandCoralPink,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                letterSpacing = 1.2.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
+                            Text(
+                                text = if (currentSection == AppSection.PROPERTIES) propertiesSectionTitle else currentSection.title,
+                                color = Color.White,
+                                fontSize = 19.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.Transparent,
+                            modifier = Modifier
+                                .size(40.dp)
+                                .liquidGlass(
+                                    shape = CircleShape,
+                                    tintColor = BrandForestSurface,
+                                    intensity = 1.2f,
+                                    accentRimColor = if (isWealthHidden) BrandCoralPink else Color.White
+                                )
+                        ) {
+                            IconButton(onClick = { isWealthHidden = !isWealthHidden }) {
+                                Icon(
+                                    if (isWealthHidden) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                    contentDescription = "Toggle Privacy Mask",
+                                    tint = if (isWealthHidden) BrandCoralPink else Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -1981,9 +2343,18 @@ fun ExpenseTrackerApp(
     ) {
         if (isExpanded) {
             Row(modifier = Modifier.fillMaxSize()) {
+                val railShape = RoundedCornerShape(28.dp)
                 NavigationRail(
-                    containerColor = BrandForestDark,
-                    modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Start + WindowInsetsSides.Vertical))
+                    containerColor = Color.Transparent,
+                    modifier = Modifier
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Start + WindowInsetsSides.Vertical))
+                        .padding(start = 10.dp, top = 10.dp, bottom = 10.dp)
+                        .liquidGlass(
+                            shape = railShape,
+                            tintColor = BrandForestDark,
+                            intensity = 1.15f,
+                            accentRimColor = currentSection.getColor(appConfig)
+                        )
                 ) {
                     Spacer(Modifier.height(16.dp))
                     activeSections.forEachIndexed { index, section ->
@@ -2000,8 +2371,8 @@ fun ExpenseTrackerApp(
                                 selectedIconColor = BrandForestDark,
                                 selectedTextColor = section.getColor(appConfig),
                                 indicatorColor = section.getColor(appConfig),
-                                unselectedIconColor = Color.White.copy(alpha = 0.7f),
-                                unselectedTextColor = Color.White.copy(alpha = 0.7f)
+                                unselectedIconColor = Color.White.copy(alpha = 0.75f),
+                                unselectedTextColor = Color.White.copy(alpha = 0.75f)
                             )
                         )
                     }
@@ -2580,16 +2951,27 @@ fun ExpenseTrackerApp(
                     topBarContent()
                 }
 
-                // Fixed Footer Navigation Bar overlay
+                // Floating Apple Liquid Glass Pill Dock Footer
+                val dockShape = RoundedCornerShape(32.dp)
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 14.dp, vertical = 8.dp)
                 ) {
                     NavigationBar(
-                        containerColor = BrandForestDark.copy(alpha = 0.95f),
-                        tonalElevation = 8.dp,
-                        modifier = Modifier.navigationBarsPadding()
+                        containerColor = Color.Transparent,
+                        tonalElevation = 0.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(68.dp)
+                            .liquidGlass(
+                                shape = dockShape,
+                                tintColor = BrandForestDark,
+                                intensity = 1.20f,
+                                accentRimColor = currentSection.getColor(appConfig)
+                            )
                     ) {
                         activeSections.forEachIndexed { index, section ->
                             NavigationBarItem(
@@ -2602,8 +2984,8 @@ fun ExpenseTrackerApp(
                                 icon = { Icon(section.icon, contentDescription = section.title) },
                                 colors = NavigationBarItemDefaults.colors(
                                     selectedIconColor = BrandForestDark,
-                                    indicatorColor = section.getColor(appConfig),
-                                    unselectedIconColor = Color.White.copy(alpha = 0.7f)
+                                    indicatorColor = section.getColor(appConfig).copy(alpha = 0.92f),
+                                    unselectedIconColor = Color.White.copy(alpha = 0.78f)
                                 )
                             )
                         }
@@ -6093,18 +6475,12 @@ fun WhatIfScenarioScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.Top
                                 ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = if (isSelected) BrandForestDark.copy(alpha = 0.18f) else tile.color.copy(alpha = 0.18f),
-                                        modifier = Modifier.size(34.dp)
-                                    ) {
-                                        Icon(
-                                            tile.icon,
-                                            contentDescription = null,
-                                            tint = if (isSelected) BrandForestDark else tile.color,
-                                            modifier = Modifier.padding(7.dp)
-                                        )
-                                    }
+                                    Icon(
+                                        tile.icon,
+                                        contentDescription = null,
+                                        tint = if (isSelected) BrandForestDark else tile.color,
+                                        modifier = Modifier.size(24.dp)
+                                    )
                                     if (isSelected) {
                                         Icon(
                                             Icons.Default.CheckCircle,
@@ -9985,16 +10361,22 @@ fun FloatingAiAssistantWidget(
         contentAlignment = Alignment.BottomEnd
     ) {
         if (!isExpanded) {
-            // Draggable Floating Chatbot Button
+            // Draggable Floating 3D Liquid Glass Orb Chatbot Button (no internal square box)
             Surface(
                 onClick = { isExpanded = true },
                 shape = CircleShape,
-                color = BrandForestDark,
-                border = BorderStroke(2.dp, BrandCoralPink),
-                shadowElevation = 10.dp,
+                color = Color.Transparent,
+                tonalElevation = 0.dp,
+                shadowElevation = 0.dp,
                 modifier = Modifier
-                    .size(58.dp)
+                    .size(60.dp)
                     .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
+                    .liquidGlass(
+                        shape = CircleShape,
+                        tintColor = BrandForestDark,
+                        intensity = 1.30f,
+                        accentRimColor = BrandCoralPink
+                    )
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
                             change.consume()
@@ -10013,20 +10395,30 @@ fun FloatingAiAssistantWidget(
                 }
             }
         } else {
-            // Professional Full-Featured AI Chatbot Window
+            // Professional Full-Featured AI Chatbot Window — Solid Opaque Background (Non-Transparent)
+            val isDark = LocalIsDarkTheme.current
+            val aiPanelShape = RoundedCornerShape(24.dp)
+            val solidAiBg = if (isDark) BrandForestSurface else Color(0xFFF6FAF8)
+            val solidAiSubSurface = if (isDark) BrandForestVariant else Color(0xFFE3EFEA)
+            val solidAiTextColor = if (isDark) Color.White else BrandForestDark
+
             Surface(
-                shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 18.dp,
-                shadowElevation = 20.dp,
-                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f)),
+                shape = aiPanelShape,
+                color = solidAiBg,
+                tonalElevation = 0.dp,
+                shadowElevation = 18.dp,
+                border = BorderStroke(1.5.dp, BrandCoralPink.copy(alpha = 0.55f)),
                 modifier = Modifier
                     .widthIn(min = 320.dp, max = 400.dp)
                     .fillMaxWidth()
                     .height(580.dp)
             ) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    // 1. Professional Chatbot Header
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(solidAiBg)
+                ) {
+                    // 1. Professional Chatbot Header (Solid BrandForestDark)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -10141,7 +10533,7 @@ fun FloatingAiAssistantWidget(
                     LazyRow(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                            .background(solidAiSubSurface)
                             .padding(horizontal = 10.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
@@ -10158,6 +10550,7 @@ fun FloatingAiAssistantWidget(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
+                            .background(solidAiBg)
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
@@ -10198,7 +10591,7 @@ fun FloatingAiAssistantWidget(
                                             bottomStart = if (isUser) 16.dp else 4.dp,
                                             bottomEnd = if (isUser) 4.dp else 16.dp
                                         ),
-                                        color = if (isUser) BrandCoralPink else MaterialTheme.colorScheme.surfaceVariant,
+                                        color = if (isUser) BrandCoralPink else solidAiSubSurface,
                                         border = if (!isUser) BorderStroke(1.dp, SlateGray.copy(alpha = 0.25f)) else null,
                                         modifier = Modifier.widthIn(max = 285.dp)
                                     ) {
@@ -10237,14 +10630,14 @@ fun FloatingAiAssistantWidget(
                                                             msg.attachedFileName,
                                                             fontSize = 10.sp,
                                                             fontWeight = FontWeight.Bold,
-                                                            color = if (isUser) BrandForestDark else MaterialTheme.colorScheme.onSurface
+                                                            color = if (isUser) BrandForestDark else solidAiTextColor
                                                         )
                                                     }
                                                 }
                                             }
                                             Text(
                                                 text = msg.text,
-                                                color = if (isUser) BrandForestDark else MaterialTheme.colorScheme.onSurface,
+                                                color = if (isUser) BrandForestDark else solidAiTextColor,
                                                 fontSize = 12.sp,
                                                 lineHeight = 17.sp
                                             )
@@ -10402,9 +10795,9 @@ fun FloatingAiAssistantWidget(
                         }
                     }
 
-                    // 5. Non-Overlapping 2-Row Composer (Toolbar Row + Text Input Row)
+                    // 5. Non-Overlapping 2-Row Composer (Toolbar Row + Text Input Row) — Solid Background
                     Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        color = solidAiSubSurface,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(
