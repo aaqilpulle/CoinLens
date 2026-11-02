@@ -7,9 +7,11 @@ import android.os.Bundle
 import android.os.Build
 import android.graphics.ImageDecoder
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import android.widget.Toast
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
@@ -25,8 +27,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -45,6 +45,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -52,6 +53,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -288,6 +290,7 @@ data class UserAppConfig(
     val showOtherAssets: Boolean = true,
     val showLoans: Boolean = true,
     val showWhatIf: Boolean = true,
+    val useExpnzAi: Boolean = true,
     // Custom Colors
     val colorWealthHex: Long = 0xFFFBBF24L, // Amber
     val colorCashFlowHex: Long = 0xFF34D399L, // Mint
@@ -455,14 +458,29 @@ class MainActivity : FragmentActivity() {
 }
 
 // ============================================================================
-// FINANCIAL CALCULATIONS & AMORTIZATION ENGINE
+// FINANCIAL CALCULATIONS, AMORTIZATION & COMPOUND PROJECTION ENGINE
 // ============================================================================
 fun calculateFortnightlyRepayment(originalLoan: Double, ratePa: Double, totalFortnights: Int = 780): Double {
     if (originalLoan <= 0.0) return 0.0
-    if (ratePa <= 0.0) return originalLoan / totalFortnights
+    val safeFortnights = totalFortnights.coerceAtLeast(26)
+    if (ratePa <= 0.0) return (originalLoan / safeFortnights).roundToInt().toDouble()
     val r = (ratePa / 100.0) / 26.0
-    val factor = (1.0 + r).pow(totalFortnights.toDouble())
+    val factor = (1.0 + r).pow(safeFortnights.toDouble())
     return ((originalLoan * (r * factor)) / (factor - 1.0)).roundToInt().toDouble()
+}
+
+fun calculateEffectiveFortnightlyRepayment(
+    loan: LoanConfig,
+    rateOverridePa: Double = loan.interestRatePa
+): Double {
+    val effectivePrincipal = if (loan.originalLoanAmount > 0.0) {
+        max(loan.originalLoanAmount, loan.startLoanBalance)
+    } else {
+        loan.startLoanBalance
+    }
+    if (effectivePrincipal <= 0.0) return 0.0
+    val totalFn = (loan.originalTermYears * 26).coerceAtLeast(26)
+    return calculateFortnightlyRepayment(effectivePrincipal, rateOverridePa, totalFn)
 }
 
 fun generateAmortizationSchedule(
@@ -477,13 +495,9 @@ fun generateAmortizationSchedule(
         LocalDate.now()
     }
 
-    var balance = config.startLoanBalance
+    var balance = config.startLoanBalance.coerceAtLeast(0.0)
     var accrued = 0.0
-    val fnPayment = calculateFortnightlyRepayment(
-        config.originalLoanAmount,
-        config.interestRatePa,
-        (config.originalTermYears * 26).coerceAtLeast(26)
-    )
+    val fnPayment = calculateEffectiveFortnightlyRepayment(config)
 
     rows.add(
         AmortizationRow(
@@ -542,6 +556,193 @@ fun getElapsedFortnightsSinceStart(startDateStr: String): Int {
     }
 }
 
+enum class CustomLeverImpactType(val label: String, val unitSuffix: String) {
+    WEEKLY_CASHFLOW("Weekly Cashflow / Savings ($/wk)", "/wk"),
+    ANNUAL_ASSET_CHANGE("Annual Investment / Asset Boost ($/yr)", "/yr"),
+    LUMP_SUM_OFFSET("Upfront Lump Sum to Offset / Cash ($)", " lump"),
+    INTEREST_RATE_DELTA("Extra Loan Interest Rate Delta (% p.a.)", "%")
+}
+
+data class CustomWhatIfLever(
+    val id: String,
+    val title: String,
+    val impactType: CustomLeverImpactType,
+    val minValue: Float,
+    val maxValue: Float,
+    val stepSize: Float,
+    val currentValue: Float,
+    val isEnabled: Boolean = true
+)
+
+data class WhatIfProjectionResult(
+    val pathASeries: List<Double>,
+    val pathBSeries: List<Double>,
+    val deficitYear: Int?,
+    val weeklyRateDeltaProp1: Double,
+    val weeklyRateDeltaProp2: Double,
+    val totalWeeklyRateDeltaCost: Double,
+    val customWeeklyCashflowTotal: Double,
+    val customAnnualAssetBoostTotal: Double,
+    val customLumpSumTotal: Double,
+    val customRateDeltaTotal: Float
+)
+
+fun computeWhatIfProjection(
+    horizonYears: Int,
+    basePropertyVal: Double,
+    baseSharesAndSuperVal: Double,
+    baseOtherAssetsVal: Double,
+    baseOffsetsVal: Double,
+    baseLiabilitiesVal: Double,
+    baseSurplusWeekly: Double,
+    prop1Loan: LoanConfig,
+    prop2Loan: LoanConfig,
+    hasSecondProperty: Boolean,
+    showLoans: Boolean,
+    lifestyleAdjustmentWeekly: Float,
+    rateShockProp1: Float,
+    rateShockProp2: Float,
+    rentalIncomeGrowthWeekly: Float,
+    superBoostWeekly: Float,
+    customLevers: List<CustomWhatIfLever>,
+    milestones: List<LifeMilestoneBlock>
+): WhatIfProjectionResult {
+    val activeCustomLevers = customLevers.filter { it.isEnabled }
+    val customWeeklyCashflow = activeCustomLevers
+        .filter { it.impactType == CustomLeverImpactType.WEEKLY_CASHFLOW }
+        .sumOf { it.currentValue.toDouble() }
+    val customAnnualAssetBoost = activeCustomLevers
+        .filter { it.impactType == CustomLeverImpactType.ANNUAL_ASSET_CHANGE }
+        .sumOf { it.currentValue.toDouble() }
+    val customLumpSum = activeCustomLevers
+        .filter { it.impactType == CustomLeverImpactType.LUMP_SUM_OFFSET }
+        .sumOf { it.currentValue.toDouble() }
+    val customRateDelta = activeCustomLevers
+        .filter { it.impactType == CustomLeverImpactType.INTEREST_RATE_DELTA }
+        .sumOf { it.currentValue.toDouble() }.toFloat()
+
+    val effectiveShock1 = rateShockProp1 + customRateDelta
+    val effectiveShock2 = rateShockProp2 + customRateDelta
+
+    val weeklyRateDelta1 = if (showLoans) {
+        val basePmt1 = calculateEffectiveFortnightlyRepayment(prop1Loan)
+        val shockedRate1 = (prop1Loan.interestRatePa + effectiveShock1).coerceAtLeast(0.5)
+        val shockedPmt1 = calculateEffectiveFortnightlyRepayment(prop1Loan, shockedRate1)
+        (shockedPmt1 - basePmt1) / 2.0
+    } else 0.0
+
+    val weeklyRateDelta2 = if (showLoans && hasSecondProperty) {
+        val basePmt2 = calculateEffectiveFortnightlyRepayment(prop2Loan)
+        val shockedRate2 = (prop2Loan.interestRatePa + effectiveShock2).coerceAtLeast(0.5)
+        val shockedPmt2 = calculateEffectiveFortnightlyRepayment(prop2Loan, shockedRate2)
+        (shockedPmt2 - basePmt2) / 2.0
+    } else if (rateShockProp2 != 0f) {
+        // Allow Property 2 Rate Lever to model a $500k investment loan if 2nd property is not yet enabled
+        val fallbackLoan = if (prop2Loan.startLoanBalance > 0.0 || prop2Loan.originalLoanAmount > 0.0) {
+            prop2Loan
+        } else {
+            LoanConfig("Property 2", LocalDate.now().toString(), 500000.0, 30, 500000.0, 30.0, 6.25, 0.0)
+        }
+        val basePmt2 = calculateEffectiveFortnightlyRepayment(fallbackLoan)
+        val shockedRate2 = (fallbackLoan.interestRatePa + effectiveShock2).coerceAtLeast(0.5)
+        val shockedPmt2 = calculateEffectiveFortnightlyRepayment(fallbackLoan, shockedRate2)
+        (shockedPmt2 - basePmt2) / 2.0
+    } else 0.0
+
+    val totalWeeklyRateCost = weeklyRateDelta1 + weeklyRateDelta2
+
+    val baseAssets = basePropertyVal + baseSharesAndSuperVal + baseOtherAssetsVal + baseOffsetsVal
+    val baseNetWorth = baseAssets - baseLiabilitiesVal
+
+    // Path A: Status Quo Baseline Compounding Trajectory
+    val pathASeries = mutableListOf<Double>()
+    var aProp = basePropertyVal
+    var aSharesSuper = baseSharesAndSuperVal
+    var aLiquid = baseOffsetsVal
+    var aLiab = baseLiabilitiesVal
+    pathASeries.add(baseNetWorth)
+
+    val safeHorizon = horizonYears.coerceIn(1, 40)
+    repeat(safeHorizon) {
+        val annualSurplus = baseSurplusWeekly * 52.0
+        aProp *= 1.04
+        aSharesSuper *= 1.075
+        aLiquid += annualSurplus
+        val debtPaydown = (aLiab * 0.035).coerceAtMost(aLiab)
+        aLiab = (aLiab - debtPaydown).coerceAtLeast(0.0)
+        val nw = (aProp + aSharesSuper + baseOtherAssetsVal + aLiquid) - aLiab
+        pathASeries.add(nw)
+    }
+
+    // Path B: Simulated What-If Plan Compounding Trajectory
+    val pathBSeries = mutableListOf<Double>()
+    var bProp = basePropertyVal
+    var bSharesSuper = baseSharesAndSuperVal
+    var bOther = baseOtherAssetsVal
+    var bLiquid = baseOffsetsVal + customLumpSum
+    var bLiab = baseLiabilitiesVal
+    var bExtraSuper = 0.0
+    var foundDeficitYear: Int? = null
+
+    pathBSeries.add(baseNetWorth + customLumpSum)
+
+    val activeMilestones = milestones.filter { it.isEnabled }
+    for (year in 1..safeHorizon) {
+        var activeWeeklyDelta =
+            lifestyleAdjustmentWeekly.toDouble() - totalWeeklyRateCost + rentalIncomeGrowthWeekly.toDouble() + customWeeklyCashflow
+        var propAssetAdd = 0.0
+        var investAssetAdd = 0.0
+        var otherAssetAdd = 0.0
+        var liabAdd = 0.0
+
+        activeMilestones.forEach { m ->
+            if (year >= m.startYear && year < m.startYear + m.durationYears) {
+                activeWeeklyDelta += m.weeklyCashflowImpact
+            }
+            if (year == m.startYear) {
+                when (m.category) {
+                    MilestoneCategory.PROPERTY -> propAssetAdd += m.assetImpact
+                    MilestoneCategory.INVESTMENT -> investAssetAdd += m.assetImpact
+                    else -> otherAssetAdd += m.assetImpact
+                }
+                liabAdd += m.liabilityImpact
+            }
+        }
+
+        val annualNetSurplus = (baseSurplusWeekly + activeWeeklyDelta) * 52.0
+        val annualSuperBoost = superBoostWeekly.toDouble() * 52.0
+
+        bProp = (bProp + propAssetAdd) * 1.04
+        bSharesSuper = (bSharesSuper + investAssetAdd + customAnnualAssetBoost) * 1.075
+        bExtraSuper = (bExtraSuper + annualSuperBoost) * 1.08
+        bOther += otherAssetAdd
+
+        bLiquid += annualNetSurplus
+        if (bLiquid < 0.0 && foundDeficitYear == null) {
+            foundDeficitYear = year
+        }
+
+        val debtPaydown = ((bLiab + liabAdd).coerceAtLeast(0.0) * 0.035).coerceAtMost((bLiab + liabAdd).coerceAtLeast(0.0))
+        bLiab = (bLiab + liabAdd - debtPaydown).coerceAtLeast(0.0)
+
+        val nw = (bProp + bSharesSuper + bExtraSuper + bOther + bLiquid) - bLiab
+        pathBSeries.add(nw)
+    }
+
+    return WhatIfProjectionResult(
+        pathASeries = pathASeries,
+        pathBSeries = pathBSeries,
+        deficitYear = foundDeficitYear,
+        weeklyRateDeltaProp1 = weeklyRateDelta1,
+        weeklyRateDeltaProp2 = weeklyRateDelta2,
+        totalWeeklyRateDeltaCost = totalWeeklyRateCost,
+        customWeeklyCashflowTotal = customWeeklyCashflow,
+        customAnnualAssetBoostTotal = customAnnualAssetBoost,
+        customLumpSumTotal = customLumpSum,
+        customRateDeltaTotal = customRateDelta
+    )
+}
+
 // ============================================================================
 // MAIN APPLICATION COMPOSABLE
 // ============================================================================
@@ -585,6 +786,7 @@ fun ExpenseTrackerApp(
             showOtherAssets = sharedPrefs.getBoolean("mod_other_assets", true),
             showLoans = sharedPrefs.getBoolean("mod_loans", true),
             showWhatIf = sharedPrefs.getBoolean("mod_what_if", true),
+            useExpnzAi = sharedPrefs.getBoolean("use_expnz_ai", true),
             colorWealthHex = sharedPrefs.getLong("color_wealth", 0xFFFBBF24L),
             colorCashFlowHex = sharedPrefs.getLong("color_cashflow", 0xFF34D399L),
             colorPropertiesHex = sharedPrefs.getLong("color_properties", 0xFF38BDF8L),
@@ -639,6 +841,7 @@ fun ExpenseTrackerApp(
             putBoolean("mod_super_shares", newConfig.showSuperAndShares)
             putBoolean("mod_other_assets", newConfig.showOtherAssets)
             putBoolean("mod_loans", newConfig.showLoans)
+            putBoolean("use_expnz_ai", newConfig.useExpnzAi)
             putLong("color_wealth", newConfig.colorWealthHex)
             putLong("color_cashflow", newConfig.colorCashFlowHex)
             putLong("color_properties", newConfig.colorPropertiesHex)
@@ -668,6 +871,7 @@ fun ExpenseTrackerApp(
             "showSuperAndShares" to newConfig.showSuperAndShares,
             "showOtherAssets" to newConfig.showOtherAssets,
             "showLoans" to newConfig.showLoans,
+            "useExpnzAi" to newConfig.useExpnzAi,
             "colorWealthHex" to newConfig.colorWealthHex,
             "colorCashFlowHex" to newConfig.colorCashFlowHex,
             "colorPropertiesHex" to newConfig.colorPropertiesHex,
@@ -906,6 +1110,7 @@ fun ExpenseTrackerApp(
                     showSuperAndShares = cfgMap["showSuperAndShares"] as? Boolean ?: appConfig.showSuperAndShares,
                     showOtherAssets = cfgMap["showOtherAssets"] as? Boolean ?: appConfig.showOtherAssets,
                     showLoans = cfgMap["showLoans"] as? Boolean ?: appConfig.showLoans,
+                    useExpnzAi = cfgMap["useExpnzAi"] as? Boolean ?: appConfig.useExpnzAi,
                     colorWealthHex = (cfgMap["colorWealthHex"] as? Number)?.toLong() ?: appConfig.colorWealthHex,
                     colorCashFlowHex = (cfgMap["colorCashFlowHex"] as? Number)?.toLong() ?: appConfig.colorCashFlowHex,
                     colorPropertiesHex = (cfgMap["colorPropertiesHex"] as? Number)?.toLong() ?: appConfig.colorPropertiesHex,
@@ -1111,7 +1316,7 @@ fun ExpenseTrackerApp(
         return
     }
 
-    // Build Dynamic Active Navigation Sections based on User Toggles
+    // Build Dynamic Active Navigation Sections based on User Toggles (Loans moved into Settings)
     val activeSections = remember(appConfig) {
         buildList {
             if (appConfig.showTotalWealth) add(AppSection.TOTAL_WEALTH)
@@ -1119,8 +1324,6 @@ fun ExpenseTrackerApp(
             if (appConfig.showProperties) add(AppSection.PROPERTIES)
             if (appConfig.showSuperAndShares) add(AppSection.SUPER_SHARES)
             if (appConfig.showOtherAssets) add(AppSection.OTHER_ASSETS)
-            val hideLoansDueToRent = appConfig.isProperty1Rented && (!appConfig.hasSecondProperty || appConfig.isProperty2Rented)
-            if (appConfig.showLoans && !hideLoansDueToRent) add(AppSection.LOANS)
             if (appConfig.showWhatIf) add(AppSection.WHAT_IF)
             add(AppSection.SETTINGS)
         }
@@ -1136,16 +1339,14 @@ fun ExpenseTrackerApp(
     // Keep currentSection in sync when user swipes horizontally
     val currentSection = activeSections.getOrElse(pagerState.currentPage) { activeSections.first() }
 
-    // Dynamic Mortgage Repayments
-    val p1LoanAmt = max(prop1Loan.originalLoanAmount, prop1Loan.startLoanBalance)
-    val prop1FortnightlyPmt = calculateFortnightlyRepayment(p1LoanAmt, prop1Loan.interestRatePa)
-    val prop1WeeklyMortgage = -(prop1FortnightlyPmt / 2.0)
+    // Dynamic Mortgage Repayments (consistent across all tabs using loan's originalTermYears & showLoans toggle)
+    val prop1FortnightlyPmt = calculateEffectiveFortnightlyRepayment(prop1Loan)
+    val prop1WeeklyMortgage = if (appConfig.showLoans) -(prop1FortnightlyPmt / 2.0) else 0.0
 
-    val p2LoanAmt = max(prop2Loan.originalLoanAmount, prop2Loan.startLoanBalance)
     val prop2FortnightlyPmt = if (appConfig.hasSecondProperty) {
-        calculateFortnightlyRepayment(p2LoanAmt, prop2Loan.interestRatePa)
+        calculateEffectiveFortnightlyRepayment(prop2Loan)
     } else 0.0
-    val prop2WeeklyMortgage = -(prop2FortnightlyPmt / 2.0)
+    val prop2WeeklyMortgage = if (appConfig.showLoans && appConfig.hasSecondProperty) -(prop2FortnightlyPmt / 2.0) else 0.0
 
     val p1AutoFortnights = getElapsedFortnightsSinceStart(prop1Loan.startDateStr)
     val p1Schedule = generateAmortizationSchedule(prop1Loan, 780)
@@ -1157,41 +1358,36 @@ fun ExpenseTrackerApp(
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
     val prop2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty) p2CurrentRow.closingBalance else 0.0
 
-    val prop1HousingCost = if (appConfig.isProperty1Rented) appConfig.primaryRentWeekly else prop1WeeklyMortgage
+    val prop1HousingCost = if (appConfig.isProperty1Rented) -appConfig.primaryRentWeekly else prop1WeeklyMortgage
     val prop1NetWeekly = prop1HousingCost + prop1Items.sumOf { it.weeklyAmount }
 
-    val prop2HousingCost = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) appConfig.secondaryRentWeekly else prop2WeeklyMortgage
-    val prop2NetWeekly = if (appConfig.hasSecondProperty) (prop2HousingCost + prop2Items.sumOf { it.weeklyAmount }) else 0.0
+    val prop2RentIncome = if (appConfig.hasSecondProperty) appConfig.secondaryRentWeekly else 0.0
+    val prop2Mortgage = if (appConfig.hasSecondProperty) prop2WeeklyMortgage else 0.0
+    val prop2Expenses = if (appConfig.hasSecondProperty) prop2Items.sumOf { it.weeklyAmount } else 0.0
+    val prop2NetWeekly = prop2RentIncome + prop2Mortgage + prop2Expenses
 
-    val combinedPropertyNet = prop1NetWeekly + (if (appConfig.hasSecondProperty) prop2NetWeekly else 0.0)
+    val combinedPropertyNet = prop1NetWeekly + prop2NetWeekly
     val splitDivisor = if (appConfig.isCoupleMode) 2.0 else 1.0
     val perPersonPropertyShare = combinedPropertyNet / splitDivisor
 
-    val p1NetStr = "${appConfig.property1Name}: ${formatCurrency(prop1NetWeekly, 2)}/wk"
-    val p2NetStr = if (appConfig.hasSecondProperty) " | ${appConfig.property2Name}: ${formatCurrency(prop2NetWeekly, 2)}/wk" else ""
-    val splitSummaryStr = if (appConfig.isCoupleMode) " (Net: ${formatCurrency(combinedPropertyNet, 2)}/wk ÷ 2)" else ""
-    val propertyBreakdownSummary = "$p1NetStr$p2NetStr$splitSummaryStr"
-
-    // Hoisted What-If Simulation Controls & Milestone State (Shared globally with AI Assistant)
+    // Hoisted What-If Simulation Controls, Custom Levers & Milestone State (Empty by default so user adds what they like)
     var whatIfHorizonYears by rememberSaveable { mutableIntStateOf(15) }
     var whatIfLifestyleAdjustmentWeekly by rememberSaveable { mutableFloatStateOf(0f) }
     var whatIfRateShockProp1 by rememberSaveable { mutableFloatStateOf(0f) }
     var whatIfRateShockProp2 by rememberSaveable { mutableFloatStateOf(0f) }
     var whatIfRentalGrowthWeekly by rememberSaveable { mutableFloatStateOf(0f) }
+    var whatIfSuperBoostWeekly by rememberSaveable { mutableFloatStateOf(0f) }
 
     val whatIfMilestoneList = remember {
-        mutableStateListOf(
-            LifeMilestoneBlock("m1", "Buy Investment Property", MilestoneCategory.PROPERTY, startYear = 2, durationYears = 15, weeklyCashflowImpact = -180.0, assetImpact = 650000.0, liabilityImpact = 520000.0, isEnabled = false),
-            LifeMilestoneBlock("m2", "Sabbatical / Unpaid Leave (6 Mo)", MilestoneCategory.CAREER, startYear = 5, durationYears = 1, weeklyCashflowImpact = -600.0, assetImpact = 0.0, liabilityImpact = 0.0, isEnabled = false),
-            LifeMilestoneBlock("m3", "Buy New Family SUV ($45k)", MilestoneCategory.PURCHASE, startYear = 3, durationYears = 1, weeklyCashflowImpact = 0.0, assetImpact = -45000.0, liabilityImpact = 0.0, isEnabled = false),
-            LifeMilestoneBlock("m4", "Executive Career Pay Rise", MilestoneCategory.CAREER, startYear = 1, durationYears = 15, weeklyCashflowImpact = 250.0, assetImpact = 0.0, liabilityImpact = 0.0, isEnabled = true),
-            LifeMilestoneBlock("m5", "Pay Extra $100/wk to Offset", MilestoneCategory.INVESTMENT, startYear = 1, durationYears = 15, weeklyCashflowImpact = -100.0, assetImpact = 0.0, liabilityImpact = 0.0, isEnabled = true)
-        )
+        mutableStateListOf<LifeMilestoneBlock>()
+    }
+    val whatIfCustomLevers = remember {
+        mutableStateListOf<CustomWhatIfLever>()
     }
 
     // Transparent Global AI Assistant Context Computation (Unmasked & Available across all tabs & scenarios)
-    val prop1Val = prop1EstimatedValue
-    val prop2Val = if (appConfig.hasSecondProperty) prop2EstimatedValue else 0.0
+    val prop1Val = if (appConfig.showProperties) prop1EstimatedValue else 0.0
+    val prop2Val = if (appConfig.showProperties && appConfig.hasSecondProperty) prop2EstimatedValue else 0.0
     val superVal = if (appConfig.showSuperAndShares) superAccountsList.sumOf { it.balance } else 0.0
     val sharesVal = if (appConfig.showSuperAndShares) sharesList.sumOf { it.units * it.currentPrice } else 0.0
     val otherVal = if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
@@ -1210,123 +1406,75 @@ fun ExpenseTrackerApp(
     val p1ExpensesListStr = person1Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" }
     val p2ExpensesListStr = if (appConfig.isCoupleMode) person2Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" } else ""
 
-    // Compute What-If Projections for Global AI Context
-    val whatIfTotalRateShockCost = run {
-        val bPmt1 = calculateFortnightlyRepayment(prop1Loan.originalLoanAmount, prop1Loan.interestRatePa)
-        val sPmt1 = calculateFortnightlyRepayment(prop1Loan.originalLoanAmount, prop1Loan.interestRatePa + whatIfRateShockProp1)
-        val j1 = (sPmt1 - bPmt1).coerceAtLeast(0.0) / 2.0
-
-        val bPmt2 = calculateFortnightlyRepayment(prop2Loan.originalLoanAmount, prop2Loan.interestRatePa)
-        val sPmt2 = calculateFortnightlyRepayment(prop2Loan.originalLoanAmount, prop2Loan.interestRatePa + whatIfRateShockProp2)
-        val j2 = (sPmt2 - bPmt2).coerceAtLeast(0.0) / 2.0
-
-        j1 + (if (appConfig.hasSecondProperty) j2 else 0.0)
-    }
-
     val whatIfBaseSurplusWeekly = run {
         val p1Exp = person1Items.sumOf { it.weeklyAmount }
         val p2Exp = if (appConfig.isCoupleMode) person2Items.sumOf { it.weeklyAmount } else 0.0
         val p1Surp = person1Income + p1Exp
         val p2Surp = if (appConfig.isCoupleMode) (person2Income + p2Exp) else 0.0
-        p1Surp + p2Surp - prop1HousingCost - prop2HousingCost
+        p1Surp + p2Surp + combinedPropertyNet
     }
 
-    val whatIfBaseAssets = exactTotalAssets
-    val whatIfBaseLiabilities = exactTotalLiabilities
-    val whatIfBaseNetWorth = exactNetWorth
+    // Unified Multi-Year What-If Projection (up to 30 years so AI can answer 1Y, 5Y, 10Y, 15Y, 20Y, 30Y questions)
+    val maxProjectionHorizon = max(whatIfHorizonYears, 30)
+    val fullWhatIfProj = computeWhatIfProjection(
+        horizonYears = maxProjectionHorizon,
+        basePropertyVal = prop1Val + prop2Val,
+        baseSharesAndSuperVal = sharesVal + superVal,
+        baseOtherAssetsVal = otherVal,
+        baseOffsetsVal = offsetsVal,
+        baseLiabilitiesVal = exactTotalLiabilities,
+        baseSurplusWeekly = whatIfBaseSurplusWeekly,
+        prop1Loan = prop1Loan,
+        prop2Loan = prop2Loan,
+        hasSecondProperty = appConfig.hasSecondProperty,
+        showLoans = appConfig.showLoans,
+        lifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
+        rateShockProp1 = whatIfRateShockProp1,
+        rateShockProp2 = whatIfRateShockProp2,
+        rentalIncomeGrowthWeekly = whatIfRentalGrowthWeekly,
+        superBoostWeekly = whatIfSuperBoostWeekly,
+        customLevers = whatIfCustomLevers,
+        milestones = whatIfMilestoneList
+    )
 
-    val whatIfPathASeries = buildList {
-        var currNW = whatIfBaseNetWorth
-        var currAssets = whatIfBaseAssets
-        var currLiab = whatIfBaseLiabilities
-        add(currNW)
-        for (i in 1..whatIfHorizonYears) {
-            val annualSurplus = whatIfBaseSurplusWeekly * 52.0
-            val assetGrowth = (sharesVal + superVal) * 0.075 + (prop1Val + prop2Val) * 0.04
-            val debtPaydown = (currLiab * 0.035).coerceAtMost(currLiab)
-            currLiab = (currLiab - debtPaydown).coerceAtLeast(0.0)
-            currAssets += annualSurplus + assetGrowth
-            currNW = currAssets - currLiab
-            add(currNW)
-        }
-    }
-
-    var whatIfDeficitYear: Int? = null
-    val whatIfPathBSeries = buildList {
-        var currNW = whatIfBaseNetWorth
-        var currAssets = whatIfBaseAssets
-        var currLiab = whatIfBaseLiabilities
-        var currLiquid = offsetsVal
-        add(currNW)
-
-        for (y in 1..whatIfHorizonYears) {
-            var activeWeeklyDelta = whatIfLifestyleAdjustmentWeekly.toDouble() - whatIfTotalRateShockCost + whatIfRentalGrowthWeekly.toDouble()
-            var activeAssetDelta = 0.0
-            var activeLiabDelta = 0.0
-
-            whatIfMilestoneList.filter { it.isEnabled }.forEach { m ->
-                if (y >= m.startYear && y < m.startYear + m.durationYears) {
-                    activeWeeklyDelta += m.weeklyCashflowImpact
-                }
-                if (y == m.startYear) {
-                    activeAssetDelta += m.assetImpact
-                    activeLiabDelta += m.liabilityImpact
-                }
-            }
-
-            val annualNetSurplus = (whatIfBaseSurplusWeekly + activeWeeklyDelta) * 52.0
-            val assetGrowth = (sharesVal + superVal) * 0.075 + (prop1Val + prop2Val) * 0.04
-            val debtPaydown = (currLiab * 0.035).coerceAtMost(currLiab)
-
-            currLiquid += annualNetSurplus
-            if (currLiquid < 0 && whatIfDeficitYear == null) {
-                whatIfDeficitYear = y
-            }
-
-            currLiab = (currLiab + activeLiabDelta - debtPaydown).coerceAtLeast(0.0)
-            currAssets += annualNetSurplus + assetGrowth + activeAssetDelta
-            currNW = currAssets - currLiab
-            add(currNW)
-        }
-    }
-
-    val whatIfEndPathANetWorth = whatIfPathASeries.lastOrNull() ?: whatIfBaseNetWorth
-    val whatIfEndPathBNetWorth = whatIfPathBSeries.lastOrNull() ?: whatIfBaseNetWorth
+    val whatIfEndPathANetWorth = fullWhatIfProj.pathASeries.getOrElse(whatIfHorizonYears) { exactNetWorth }
+    val whatIfEndPathBNetWorth = fullWhatIfProj.pathBSeries.getOrElse(whatIfHorizonYears) { exactNetWorth }
     val whatIfNetDifference = whatIfEndPathBNetWorth - whatIfEndPathANetWorth
+    val whatIfDeficitYear = fullWhatIfProj.deficitYear?.takeIf { it <= whatIfHorizonYears }
 
     val prop1ItemsStr = prop1Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" }
     val prop2ItemsStr = if (appConfig.hasSecondProperty) prop2Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" } else ""
 
     val detailedFinancialContext = buildString {
-        append("EXPLICIT COMPUTED FINANCIAL TOTALS & UNMASKED GLOBAL APP DATA (DO NOT RECALCULATE): ")
-        append("Exact Net Worth = ${formatCurrency(exactNetWorth, 2)}. ")
-        append("Exact Total Assets = ${formatCurrency(exactTotalAssets, 2)} (Properties: ${formatCurrency(prop1Val + prop2Val, 0)}, Shares: ${formatCurrency(sharesVal, 0)}, Super: ${formatCurrency(superVal, 0)}, Other Assets: ${formatCurrency(otherVal, 0)}, Offset Accounts: ${formatCurrency(offsetsVal, 0)}). ")
-        append("Exact Total Liabilities = ${formatCurrency(exactTotalLiabilities, 2)} (Property 1 Mortgage: ${formatCurrency(prop1LiveBalance, 0)}, Property 2 Mortgage: ${formatCurrency(prop2LiveBalance, 0)}). ")
+        append("EXPLICIT COMPUTED FINANCIAL TOTALS & UNMASKED GLOBAL APP DATA (CURRENT & FUTURE): ")
+        append("Exact Net Worth Today = ${formatCurrency(exactNetWorth, 2)}. ")
+        append("Exact Total Assets Today = ${formatCurrency(exactTotalAssets, 2)} (Properties: ${formatCurrency(prop1Val + prop2Val, 0)}, Shares: ${formatCurrency(sharesVal, 0)}, Super: ${formatCurrency(superVal, 0)}, Other Assets: ${formatCurrency(otherVal, 0)}, Offset Accounts: ${formatCurrency(offsetsVal, 0)}). ")
+        append("Exact Total Liabilities Today = ${formatCurrency(exactTotalLiabilities, 2)} (Property 1 Mortgage: ${formatCurrency(prop1LiveBalance, 0)}, Property 2 Mortgage: ${formatCurrency(prop2LiveBalance, 0)}). ")
 
         append("\n\n1. PERSONAL CASH FLOW TAB (UNMASKED): ")
-        append("User (${appConfig.person1Name}): Income = ${formatCurrency(person1Income, 2)}/wk, Total Expenses = ${formatCurrency(abs(p1TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p1SurplusContext, 2)}/wk. ")
-        if (p1ExpensesListStr.isNotBlank()) append("User Itemized Expenses: $p1ExpensesListStr. ")
+        append("Person 1 (${appConfig.person1Name}): Income = ${formatCurrency(person1Income, 2)}/wk, Total Expenses (incl. property share) = ${formatCurrency(abs(p1TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p1SurplusContext, 2)}/wk. ")
+        if (p1ExpensesListStr.isNotBlank()) append("Person 1 Itemized Expenses: $p1ExpensesListStr. ")
 
         if (appConfig.isCoupleMode) {
-            append("Partner (${appConfig.person2Name}): Income = ${formatCurrency(person2Income, 2)}/wk, Total Expenses = ${formatCurrency(abs(p2TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p2SurplusContext, 2)}/wk. ")
-            if (p2ExpensesListStr.isNotBlank()) append("Partner Itemized Expenses: $p2ExpensesListStr. ")
-            append("COMBINED WEEKLY NET SURPLUS = ${formatCurrency(combinedSurplusContext, 2)}/wk. ")
+            append("Person 2 (${appConfig.person2Name}): Income = ${formatCurrency(person2Income, 2)}/wk, Total Expenses (incl. property share) = ${formatCurrency(abs(p2TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p2SurplusContext, 2)}/wk. ")
+            if (p2ExpensesListStr.isNotBlank()) append("Person 2 Itemized Expenses: $p2ExpensesListStr. ")
+            append("COMBINED WEEKLY NET SURPLUS = ${formatCurrency(combinedSurplusContext, 2)}/wk (${formatCurrency(combinedSurplusContext * 52.0, 0)}/yr). ")
         }
 
         append("\n\n2. PROPERTIES TAB (UNMASKED): ")
-        append("Property 1 (${appConfig.property1Name}): Market Value = ${formatCurrency(prop1Val, 0)}, Mortgage Balance = ${formatCurrency(prop1LiveBalance, 0)}, Net Equity = ${formatCurrency(prop1Val - prop1LiveBalance, 0)}, Status = ${if (appConfig.isProperty1Rented) "Rented (${formatCurrency(appConfig.primaryRentWeekly, 0)}/wk)" else "Owner Occupied"}. ")
-        if (prop1ItemsStr.isNotBlank()) append("Property 1 Expenses: $prop1ItemsStr. ")
+        append("Property 1 (${appConfig.property1Name}): Market Value = ${formatCurrency(prop1EstimatedValue, 0)}, Mortgage Balance = ${formatCurrency(prop1LiveBalance, 0)}, Net Equity = ${formatCurrency(prop1EstimatedValue - prop1LiveBalance, 0)}, Status = ${if (appConfig.isProperty1Rented) "Rented (${formatCurrency(appConfig.primaryRentWeekly, 0)}/wk)" else "Owner Occupied"}, Weekly Net Cashflow = ${formatCurrency(prop1NetWeekly, 2)}/wk. ")
+        if (prop1ItemsStr.isNotBlank()) append("Property 1 Bills/Items: $prop1ItemsStr. ")
 
         if (appConfig.hasSecondProperty) {
-            append("Property 2 (${appConfig.property2Name}): Market Value = ${formatCurrency(prop2Val, 0)}, Mortgage Balance = ${formatCurrency(prop2LiveBalance, 0)}, Net Equity = ${formatCurrency(prop2Val - prop2LiveBalance, 0)}, Status = ${if (appConfig.isProperty2Rented) "Rented (${formatCurrency(appConfig.secondaryRentWeekly, 0)}/wk)" else "Owner Occupied"}. ")
-            if (prop2ItemsStr.isNotBlank()) append("Property 2 Expenses: $prop2ItemsStr. ")
+            append("Property 2 (${appConfig.property2Name}): Market Value = ${formatCurrency(prop2EstimatedValue, 0)}, Mortgage Balance = ${formatCurrency(prop2LiveBalance, 0)}, Net Equity = ${formatCurrency(prop2EstimatedValue - prop2LiveBalance, 0)}, Status = Rented (${formatCurrency(appConfig.secondaryRentWeekly, 0)}/wk), Weekly Net Cashflow = ${formatCurrency(prop2NetWeekly, 2)}/wk. ")
+            if (prop2ItemsStr.isNotBlank()) append("Property 2 Bills/Items: $prop2ItemsStr. ")
         }
 
         append("\n\n3. LOANS & OFFSET TAB (UNMASKED AMORTIZATION): ")
-        append("Property 1 Loan (${prop1Loan.name}): Original Loan = ${formatCurrency(prop1Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop1Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop1LiveBalance, 0)}, Interest Rate = ${prop1Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop1Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(max(0.0, prop1LiveBalance - prop1Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop1FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(abs(prop1WeeklyMortgage), 2)}. ")
+        append("Property 1 Loan (${prop1Loan.name}): Original Loan = ${formatCurrency(prop1Loan.originalLoanAmount, 0)}, Term = ${prop1Loan.originalTermYears} yrs, Start Balance = ${formatCurrency(prop1Loan.startLoanBalance, 0)}, Current Live Balance = ${formatCurrency(prop1LiveBalance, 0)}, Interest Rate = ${prop1Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop1Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(max(0.0, prop1LiveBalance - prop1Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop1FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(abs(prop1WeeklyMortgage), 2)}. ")
 
         if (appConfig.hasSecondProperty) {
-            append("Property 2 Loan (${prop2Loan.name}): Original Loan = ${formatCurrency(prop2Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop2Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop2LiveBalance, 0)}, Interest Rate = ${prop2Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop2Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(max(0.0, prop2LiveBalance - prop2Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop2FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(abs(prop2WeeklyMortgage), 2)}. ")
+            append("Property 2 Loan (${prop2Loan.name}): Original Loan = ${formatCurrency(prop2Loan.originalLoanAmount, 0)}, Term = ${prop2Loan.originalTermYears} yrs, Start Balance = ${formatCurrency(prop2Loan.startLoanBalance, 0)}, Current Live Balance = ${formatCurrency(prop2LiveBalance, 0)}, Interest Rate = ${prop2Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop2Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(max(0.0, prop2LiveBalance - prop2Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop2FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(abs(prop2WeeklyMortgage), 2)}. ")
         }
 
         append("\n\n4. SUPER & SHARES TAB (UNMASKED): ")
@@ -1336,7 +1484,7 @@ fun ExpenseTrackerApp(
         if (sharesList.isNotEmpty()) {
             val totalSharesCost = sharesList.sumOf { it.units * it.purchasePrice }
             val totalSharesGain = sharesVal - totalSharesCost
-            append("Shares Portfolio (${sharesList.size} holdings, Total Market Value ${formatCurrency(sharesVal, 0)}, Cost Basis ${formatCurrency(totalSharesCost, 0)}, Net Gain/Loss ${formatCurrency(totalSharesGain, 0)}): ${sharesList.joinToString { "${it.code} (${it.owner}, ${it.units} units @ \$${it.currentPrice}, Purchase Price \$${it.purchasePrice}, Market Value ${formatCurrency(it.units * it.currentPrice, 0)}, Gain/Loss ${formatCurrency((it.currentPrice - it.purchasePrice) * it.units, 0)})" }}. ")
+            append("Shares Portfolio (${sharesList.size} holdings, Total Market Value ${formatCurrency(sharesVal, 0)}, Cost Basis ${formatCurrency(totalSharesCost, 0)}, Net Gain/Loss ${formatCurrency(totalSharesGain, 0)}): ${sharesList.joinToString { "${it.code} (${it.owner}, ${it.units} units @ ${formatCurrency(it.currentPrice, 2)}, Purchase Price ${formatCurrency(it.purchasePrice, 2)}, Market Value ${formatCurrency(it.units * it.currentPrice, 0)}, Gain/Loss ${formatCurrency((it.currentPrice - it.purchasePrice) * it.units, 0)})" }}. ")
         }
 
         append("\n\n5. OTHER ASSETS TAB (UNMASKED): ")
@@ -1344,30 +1492,396 @@ fun ExpenseTrackerApp(
             append("Other Assets (Total ${formatCurrency(otherVal, 0)}): ${otherAssetsList.joinToString { "${it.name} (${it.owner}): ${formatCurrency(it.value, 0)}" }}. ")
         }
 
-        append("\n\n6. WHAT-IF SCENARIO SIMULATOR (ACTIVE PROJECTIONS & FUTURE ENTRIES): ")
+        append("\n\n6. WHAT-IF SCENARIO SIMULATOR (ACTIVE LEVERS, CUSTOM LEVERS, MILESTONES & FUTURE PROJECTIONS): ")
         append("Active Timeframe = $whatIfHorizonYears Years. ")
         append("Extra Weekly Savings/Spending = ${if (whatIfLifestyleAdjustmentWeekly >= 0) "+$" else "-$"}${abs(whatIfLifestyleAdjustmentWeekly)}/wk. ")
-        append("Property 1 Rate Shock = +$whatIfRateShockProp1%. ")
-        if (appConfig.hasSecondProperty) append("Property 2 Rate Shock = +$whatIfRateShockProp2%. ")
-        if (whatIfRentalGrowthWeekly != 0f) append("Rental Growth = +$$whatIfRentalGrowthWeekly/wk. ")
+        append("Property 1 Rate Change (${appConfig.property1Name}) = ${if (whatIfRateShockProp1 >= 0) "+" else ""}${whatIfRateShockProp1}% (Weekly repayment delta: ${formatCurrency(fullWhatIfProj.weeklyRateDeltaProp1, 2)}/wk). ")
+        if (appConfig.hasSecondProperty) {
+            append("Property 2 Rate Change (${appConfig.property2Name}) = ${if (whatIfRateShockProp2 >= 0) "+" else ""}${whatIfRateShockProp2}% (Weekly repayment delta: ${formatCurrency(fullWhatIfProj.weeklyRateDeltaProp2, 2)}/wk). ")
+        }
+        if (whatIfSuperBoostWeekly != 0f) append("Extra Super Salary Sacrifice = +$${whatIfSuperBoostWeekly}/wk. ")
+        if (whatIfRentalGrowthWeekly != 0f) append("Rental Cashflow Change = ${if (whatIfRentalGrowthWeekly >= 0) "+$" else "-$"}${abs(whatIfRentalGrowthWeekly)}/wk. ")
+
+        if (whatIfCustomLevers.isNotEmpty()) {
+            append("Custom User Levers (${whatIfCustomLevers.size}): ${whatIfCustomLevers.joinToString { "${it.title}: ${it.currentValue}${it.impactType.unitSuffix} (${it.impactType.label})" }}. ")
+        }
 
         val activeMilestones = whatIfMilestoneList.filter { it.isEnabled }
-        val inactiveMilestones = whatIfMilestoneList.filter { !it.isEnabled }
-
         if (activeMilestones.isNotEmpty()) {
-            append("Active Life Milestone Entries (${activeMilestones.size}): ${activeMilestones.joinToString { "${it.title} [Category: ${it.category.label}, Start Year: ${it.startYear}, Duration: ${it.durationYears} yrs, Weekly Cashflow Impact: ${if (it.weeklyCashflowImpact >= 0) "+" else ""}\$${it.weeklyCashflowImpact}/wk, Asset Impact: \$${it.assetImpact}, Liability Impact: \$${it.liabilityImpact}]" }}. ")
+            append("Active Life Milestones (${activeMilestones.size}): ${activeMilestones.joinToString { "${it.title} [Category: ${it.category.label}, Start Year: ${it.startYear}, Duration: ${it.durationYears} yrs, Weekly Impact: ${formatCurrency(it.weeklyCashflowImpact, 0)}/wk, Asset Impact: ${formatCurrency(it.assetImpact, 0)}, Loan Impact: ${formatCurrency(it.liabilityImpact, 0)}]" }}. ")
         } else {
-            append("No active milestone entries selected. ")
-        }
-        if (inactiveMilestones.isNotEmpty()) {
-            append("Available Inactive Milestone Options (${inactiveMilestones.size}): ${inactiveMilestones.joinToString { it.title }}. ")
+            append("No active milestone events. ")
         }
 
-        append("Simulated Projection Results (${whatIfHorizonYears} Years): ")
-        append("Path A (Status Quo Baseline Net Worth in $whatIfHorizonYears Yrs) = ${formatCurrency(whatIfEndPathANetWorth, 0)}. ")
-        append("Path B (Simulated Future Plan Net Worth in $whatIfHorizonYears Yrs) = ${formatCurrency(whatIfEndPathBNetWorth, 0)}. ")
-        append("Net Difference / Advantage = ${if (whatIfNetDifference >= 0) "+" else ""}${formatCurrency(whatIfNetDifference, 0)}. ")
-        append("Cashflow Deficit Year = ${if (whatIfDeficitYear != null) "Year $whatIfDeficitYear (Cash reserves enter deficit)" else "None (Cash reserves positive)"}. ")
+        append("Selected Horizon ($whatIfHorizonYears Yrs) Results: ")
+        append("Path A (Status Quo Net Worth in $whatIfHorizonYears Yrs) = ${formatCurrency(whatIfEndPathANetWorth, 0)}. ")
+        append("Path B (What-If Plan Net Worth in $whatIfHorizonYears Yrs) = ${formatCurrency(whatIfEndPathBNetWorth, 0)}. ")
+        append("Net Difference = ${if (whatIfNetDifference >= 0) "+" else ""}${formatCurrency(whatIfNetDifference, 0)}. ")
+        append("Cashflow Deficit Year = ${if (whatIfDeficitYear != null) "Year $whatIfDeficitYear" else "None"}. ")
+
+        val checkpoints = listOf(1, 5, 10, 15, 20, 30).filter { it <= fullWhatIfProj.pathASeries.lastIndex }
+        append("Multi-Year Future Trajectory Checkpoints (Status Quo -> What-If Plan): ")
+        append(checkpoints.joinToString(" | ") { yr ->
+            "Yr $yr: ${formatCurrency(fullWhatIfProj.pathASeries[yr], 0)} -> ${formatCurrency(fullWhatIfProj.pathBSeries[yr], 0)}"
+        })
+    }
+
+    // Live AI Read/Write Action Executor — allows the AI to edit any mutable data in the app when asked
+    fun executeAiActions(rawResponse: String): Pair<String, List<String>> {
+        val actionRegex = Regex("""\[\[ACTION:([^]]+)]]""")
+        val appliedSummaries = mutableListOf<String>()
+
+        actionRegex.findAll(rawResponse).forEach { match ->
+            val payload = match.groupValues[1].trim()
+            val parts = payload.split("|").map { it.trim() }
+            if (parts.isEmpty()) return@forEach
+            val actionType = parts.first().uppercase()
+            val params = mutableMapOf<String, String>()
+            parts.drop(1).forEach { kv ->
+                val idx = kv.indexOf('=')
+                if (idx > 0) {
+                    val k = kv.substring(0, idx).trim().lowercase()
+                    val v = kv.substring(idx + 1).trim()
+                    params[k] = v
+                }
+            }
+
+            when (actionType) {
+                "UPDATE_INCOME" -> {
+                    val personNum = params["person"]?.toIntOrNull() ?: 1
+                    val amount = params["weeklyamount"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    if (amount != null && amount >= 0.0) {
+                        if (personNum == 2 && appConfig.isCoupleMode) {
+                            person2Income = amount
+                            sharedPrefs.edit { putFloat("person2_inc", amount.toFloat()) }
+                            updateFirestore("person2_inc", amount)
+                            appliedSummaries.add("Updated ${appConfig.person2Name} income to ${formatCurrency(amount, 2)}/wk")
+                        } else {
+                            person1Income = amount
+                            sharedPrefs.edit { putFloat("person1_inc", amount.toFloat()) }
+                            updateFirestore("person1_inc", amount)
+                            appliedSummaries.add("Updated ${appConfig.person1Name} income to ${formatCurrency(amount, 2)}/wk")
+                        }
+                    }
+                }
+                "ADD_EXPENSE", "UPDATE_EXPENSE" -> {
+                    val personNum = params["person"]?.toIntOrNull() ?: 1
+                    val name = params["name"]?.takeIf { it.isNotBlank() } ?: "Expense"
+                    val rawAmt = params["weeklyamount"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    val iconName = params["icon"] ?: "Receipt"
+                    if (rawAmt != null) {
+                        val signedAmt = if (rawAmt > 0) -rawAmt else rawAmt
+                        if (personNum == 2 && appConfig.isCoupleMode) {
+                            val existingIdx = person2Items.indexOfFirst { it.name.equals(name, ignoreCase = true) }
+                            val updated = if (existingIdx >= 0) {
+                                person2Items.toMutableList().apply {
+                                    set(existingIdx, this[existingIdx].copy(name = name, weeklyAmount = signedAmt))
+                                }
+                            } else {
+                                person2Items + CashflowItem("p2_${System.currentTimeMillis()}", name, signedAmt, iconName = iconName)
+                            }
+                            person2Items = updated
+                            saveList("person2_items", updated)
+                            appliedSummaries.add("Saved $name (${formatCurrency(abs(signedAmt), 2)}/wk) for ${appConfig.person2Name}")
+                        } else {
+                            val existingIdx = person1Items.indexOfFirst { it.name.equals(name, ignoreCase = true) }
+                            val updated = if (existingIdx >= 0) {
+                                person1Items.toMutableList().apply {
+                                    set(existingIdx, this[existingIdx].copy(name = name, weeklyAmount = signedAmt))
+                                }
+                            } else {
+                                person1Items + CashflowItem("p1_${System.currentTimeMillis()}", name, signedAmt, iconName = iconName)
+                            }
+                            person1Items = updated
+                            saveList("person1_items", updated)
+                            appliedSummaries.add("Saved $name (${formatCurrency(abs(signedAmt), 2)}/wk) for ${appConfig.person1Name}")
+                        }
+                    }
+                }
+                "DELETE_EXPENSE" -> {
+                    val personNum = params["person"]?.toIntOrNull() ?: 1
+                    val name = params["name"]?.takeIf { it.isNotBlank() }
+                    if (name != null) {
+                        if (personNum == 2) {
+                            val updated = person2Items.filterNot { it.name.contains(name, ignoreCase = true) }
+                            person2Items = updated
+                            saveList("person2_items", updated)
+                        } else {
+                            val updated = person1Items.filterNot { it.name.contains(name, ignoreCase = true) }
+                            person1Items = updated
+                            saveList("person1_items", updated)
+                        }
+                        appliedSummaries.add("Removed '$name' expense")
+                    }
+                }
+                "UPDATE_PROPERTY" -> {
+                    val propNum = params["property"]?.toIntOrNull() ?: 1
+                    val marketVal = params["marketvalue"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    val rentVal = params["rentweekly"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    val newName = params["name"]?.takeIf { it.isNotBlank() }
+                    val isRentedFlag = params["isrented"]?.toBooleanStrictOrNull()
+
+                    if (propNum == 2) {
+                        var cfg = appConfig.copy(hasSecondProperty = true)
+                        if (newName != null) cfg = cfg.copy(property2Name = newName)
+                        if (rentVal != null) cfg = cfg.copy(secondaryRentWeekly = abs(rentVal))
+                        if (isRentedFlag != null) cfg = cfg.copy(isProperty2Rented = isRentedFlag)
+                        saveAppConfig(cfg)
+                        if (marketVal != null && marketVal > 0) savePropertyValuations(prop1EstimatedValue, marketVal)
+                        appliedSummaries.add("Updated Property 2 (${cfg.property2Name})")
+                    } else {
+                        var cfg = appConfig
+                        if (newName != null) cfg = cfg.copy(property1Name = newName)
+                        if (rentVal != null) cfg = cfg.copy(primaryRentWeekly = abs(rentVal))
+                        if (isRentedFlag != null) cfg = cfg.copy(isProperty1Rented = isRentedFlag)
+                        saveAppConfig(cfg)
+                        if (marketVal != null && marketVal > 0) savePropertyValuations(marketVal, prop2EstimatedValue)
+                        appliedSummaries.add("Updated Property 1 (${cfg.property1Name})")
+                    }
+                }
+                "ADD_PROPERTY_ITEM" -> {
+                    val propNum = params["property"]?.toIntOrNull() ?: 1
+                    val name = params["name"]?.takeIf { it.isNotBlank() } ?: "Property Expense"
+                    val rawAmt = params["weeklyamount"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    if (rawAmt != null) {
+                        val signedAmt = if (rawAmt > 0) -rawAmt else rawAmt
+                        if (propNum == 2) {
+                            val updated = prop2Items + CashflowItem("pr2_${System.currentTimeMillis()}", name, signedAmt)
+                            prop2Items = updated
+                            saveList("prop2_items", updated)
+                            appliedSummaries.add("Added $name (${formatCurrency(abs(signedAmt), 2)}/wk) to ${appConfig.property2Name}")
+                        } else {
+                            val updated = prop1Items + CashflowItem("pr1_${System.currentTimeMillis()}", name, signedAmt)
+                            prop1Items = updated
+                            saveList("prop1_items", updated)
+                            appliedSummaries.add("Added $name (${formatCurrency(abs(signedAmt), 2)}/wk) to ${appConfig.property1Name}")
+                        }
+                    }
+                }
+                "DELETE_PROPERTY_ITEM" -> {
+                    val propNum = params["property"]?.toIntOrNull() ?: 1
+                    val name = params["name"]?.takeIf { it.isNotBlank() }
+                    if (name != null) {
+                        if (propNum == 2) {
+                            val updated = prop2Items.filterNot { it.name.contains(name, ignoreCase = true) }
+                            prop2Items = updated
+                            saveList("prop2_items", updated)
+                        } else {
+                            val updated = prop1Items.filterNot { it.name.contains(name, ignoreCase = true) }
+                            prop1Items = updated
+                            saveList("prop1_items", updated)
+                        }
+                        appliedSummaries.add("Removed '$name' from property bills")
+                    }
+                }
+                "UPDATE_LOAN" -> {
+                    val propNum = params["property"]?.toIntOrNull() ?: 1
+                    val bal = params["balance"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    val rate = params["rate"]?.replace("%", "")?.toDoubleOrNull()
+                    val offset = params["offset"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    val orig = params["originalloan"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    val term = params["termyears"]?.toIntOrNull()
+                    if (propNum == 2) {
+                        val updated = prop2Loan.copy(
+                            startLoanBalance = bal ?: prop2Loan.startLoanBalance,
+                            originalLoanAmount = orig ?: max(prop2Loan.originalLoanAmount, bal ?: prop2Loan.startLoanBalance),
+                            interestRatePa = rate ?: prop2Loan.interestRatePa,
+                            offsetBalance = offset ?: prop2Loan.offsetBalance,
+                            originalTermYears = term ?: prop2Loan.originalTermYears
+                        )
+                        saveProp2Loan(updated)
+                        appliedSummaries.add("Updated ${prop2Loan.name} Loan parameters")
+                    } else {
+                        val updated = prop1Loan.copy(
+                            startLoanBalance = bal ?: prop1Loan.startLoanBalance,
+                            originalLoanAmount = orig ?: max(prop1Loan.originalLoanAmount, bal ?: prop1Loan.startLoanBalance),
+                            interestRatePa = rate ?: prop1Loan.interestRatePa,
+                            offsetBalance = offset ?: prop1Loan.offsetBalance,
+                            originalTermYears = term ?: prop1Loan.originalTermYears
+                        )
+                        saveProp1Loan(updated)
+                        appliedSummaries.add("Updated ${prop1Loan.name} Loan parameters")
+                    }
+                }
+                "ADD_SHARE", "UPDATE_SHARE" -> {
+                    val code = params["code"]?.trim()?.uppercase()?.takeIf { it.isNotBlank() }
+                    val owner = params["owner"]?.takeIf { it.isNotBlank() } ?: appConfig.person1Name
+                    val units = params["units"]?.replace(",", "")?.toDoubleOrNull()
+                    val pPrice = params["purchaseprice"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    val cPrice = params["currentprice"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    if (code != null) {
+                        val existingIdx = sharesList.indexOfFirst { it.code.equals(code, ignoreCase = true) }
+                        val updated = if (existingIdx >= 0) {
+                            val curr = sharesList[existingIdx]
+                            sharesList.toMutableList().apply {
+                                set(
+                                    existingIdx,
+                                    curr.copy(
+                                        owner = owner,
+                                        units = units ?: curr.units,
+                                        purchasePrice = pPrice ?: curr.purchasePrice,
+                                        currentPrice = cPrice ?: pPrice ?: curr.currentPrice
+                                    )
+                                )
+                            }
+                        } else {
+                            val u = units ?: 1.0
+                            val pp = pPrice ?: cPrice ?: 10.0
+                            val cp = cPrice ?: pp
+                            sharesList + ShareParcel("sp_${System.currentTimeMillis()}", code, owner, u, pp, cp)
+                        }
+                        saveSharesList(updated)
+                        appliedSummaries.add("Saved share holding $code")
+                    }
+                }
+                "DELETE_SHARE" -> {
+                    val code = params["code"]?.trim()
+                    if (!code.isNullOrBlank()) {
+                        val updated = sharesList.filterNot { it.code.equals(code, ignoreCase = true) }
+                        saveSharesList(updated)
+                        appliedSummaries.add("Removed share holding $code")
+                    }
+                }
+                "ADD_SUPER", "UPDATE_SUPER" -> {
+                    val fund = params["fundname"]?.takeIf { it.isNotBlank() } ?: "Super Fund"
+                    val owner = params["owner"]?.takeIf { it.isNotBlank() } ?: appConfig.person1Name
+                    val bal = params["balance"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    if (bal != null) {
+                        val existingIdx = superAccountsList.indexOfFirst {
+                            it.fundName.equals(fund, ignoreCase = true) || it.owner.equals(owner, ignoreCase = true)
+                        }
+                        val updated = if (existingIdx >= 0 && actionType == "UPDATE_SUPER") {
+                            superAccountsList.toMutableList().apply {
+                                set(existingIdx, this[existingIdx].copy(fundName = fund, owner = owner, balance = bal))
+                            }
+                        } else {
+                            superAccountsList + SuperAccount("sup_${System.currentTimeMillis()}", fund, owner, bal)
+                        }
+                        saveSuperAccounts(updated)
+                        appliedSummaries.add("Saved Super account $fund (${formatCurrency(bal, 0)})")
+                    }
+                }
+                "DELETE_SUPER" -> {
+                    val fund = params["fundname"]?.takeIf { it.isNotBlank() }
+                    if (fund != null) {
+                        val updated = superAccountsList.filterNot { it.fundName.contains(fund, ignoreCase = true) }
+                        saveSuperAccounts(updated)
+                        appliedSummaries.add("Deleted Super account $fund")
+                    }
+                }
+                "ADD_OTHER_ASSET", "UPDATE_OTHER_ASSET" -> {
+                    val name = params["name"]?.takeIf { it.isNotBlank() } ?: "Asset"
+                    val owner = params["owner"]?.takeIf { it.isNotBlank() } ?: appConfig.person1Name
+                    val valAmt = params["value"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull()
+                    if (valAmt != null) {
+                        val existingIdx = otherAssetsList.indexOfFirst { it.name.equals(name, ignoreCase = true) }
+                        val updated = if (existingIdx >= 0) {
+                            otherAssetsList.toMutableList().apply {
+                                set(existingIdx, this[existingIdx].copy(name = name, owner = owner, value = valAmt))
+                            }
+                        } else {
+                            otherAssetsList + OtherAsset("oa_${System.currentTimeMillis()}", name, owner, valAmt)
+                        }
+                        saveOtherAssets(updated)
+                        appliedSummaries.add("Saved asset $name (${formatCurrency(valAmt, 0)})")
+                    }
+                }
+                "DELETE_OTHER_ASSET" -> {
+                    val name = params["name"]?.takeIf { it.isNotBlank() }
+                    if (name != null) {
+                        val updated = otherAssetsList.filterNot { it.name.contains(name, ignoreCase = true) }
+                        saveOtherAssets(updated)
+                        appliedSummaries.add("Removed asset $name")
+                    }
+                }
+                "UPDATE_WHAT_IF" -> {
+                    params["horizonyears"]?.toIntOrNull()?.let { whatIfHorizonYears = it.coerceIn(1, 40) }
+                    params["savingsweekly"]?.replace("$", "")?.toFloatOrNull()?.let { whatIfLifestyleAdjustmentWeekly = it.coerceIn(-2000f, 5000f) }
+                    params["ratechangeprop1"]?.replace("%", "")?.toFloatOrNull()?.let { whatIfRateShockProp1 = it.coerceIn(-5f, 8f) }
+                    params["ratechangeprop2"]?.replace("%", "")?.toFloatOrNull()?.let { whatIfRateShockProp2 = it.coerceIn(-5f, 8f) }
+                    params["superboostweekly"]?.replace("$", "")?.toFloatOrNull()?.let { whatIfSuperBoostWeekly = it.coerceIn(0f, 3000f) }
+                    params["rentchangeweekly"]?.replace("$", "")?.toFloatOrNull()?.let { whatIfRentalGrowthWeekly = it.coerceIn(-2000f, 5000f) }
+                    appliedSummaries.add("Updated What-If Simulator levers")
+                }
+                "ADD_CUSTOM_LEVER", "UPDATE_CUSTOM_LEVER" -> {
+                    val name = params["name"]?.takeIf { it.isNotBlank() } ?: "Custom Lever"
+                    val value = params["value"]?.replace("$", "")?.replace("%", "")?.toFloatOrNull() ?: 0f
+                    val minV = params["min"]?.toFloatOrNull() ?: -500f
+                    val maxV = params["max"]?.toFloatOrNull() ?: 500f
+                    val stepV = params["step"]?.toFloatOrNull() ?: 25f
+                    val impactStr = params["impacttype"]?.uppercase() ?: "WEEKLY_CASHFLOW"
+                    val impact = CustomLeverImpactType.entries.find { it.name == impactStr } ?: CustomLeverImpactType.WEEKLY_CASHFLOW
+                    val existingIdx = whatIfCustomLevers.indexOfFirst { it.title.equals(name, ignoreCase = true) }
+                    if (existingIdx >= 0) {
+                        whatIfCustomLevers[existingIdx] = whatIfCustomLevers[existingIdx].copy(currentValue = value)
+                    } else {
+                        whatIfCustomLevers.add(
+                            CustomWhatIfLever(
+                                id = "cl_${System.currentTimeMillis()}",
+                                title = name,
+                                impactType = impact,
+                                minValue = if (value < minV) value else minV,
+                                maxValue = if (value > maxV) value else maxV,
+                                stepSize = stepV,
+                                currentValue = value,
+                                isEnabled = true
+                            )
+                        )
+                    }
+                    appliedSummaries.add("Saved custom lever '$name' = $value${impact.unitSuffix}")
+                }
+                "DELETE_CUSTOM_LEVER" -> {
+                    val name = params["name"]?.takeIf { it.isNotBlank() }
+                    if (name != null) {
+                        whatIfCustomLevers.removeAll { it.title.contains(name, ignoreCase = true) }
+                        appliedSummaries.add("Removed custom lever '$name'")
+                    }
+                }
+                "ADD_MILESTONE" -> {
+                    val title = params["title"]?.takeIf { it.isNotBlank() } ?: "Custom Milestone"
+                    val catStr = params["category"]?.uppercase() ?: "PURCHASE"
+                    val cat = MilestoneCategory.entries.find { it.name == catStr } ?: MilestoneCategory.PURCHASE
+                    val startY = (params["startyear"]?.toIntOrNull() ?: 2).coerceIn(1, 30)
+                    val durY = (params["durationyears"]?.toIntOrNull() ?: 1).coerceIn(1, 30)
+                    val wk = params["weeklycashflow"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull() ?: 0.0
+                    val ast = params["assetimpact"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull() ?: 0.0
+                    val liab = params["liabilityimpact"]?.replace("$", "")?.replace(",", "")?.toDoubleOrNull() ?: 0.0
+                    whatIfMilestoneList.add(
+                        LifeMilestoneBlock(
+                            id = "m_${System.currentTimeMillis()}",
+                            title = title,
+                            category = cat,
+                            startYear = startY,
+                            durationYears = durY,
+                            weeklyCashflowImpact = wk,
+                            assetImpact = ast,
+                            liabilityImpact = liab,
+                            isEnabled = true
+                        )
+                    )
+                    appliedSummaries.add("Added milestone '$title' (Yr $startY)")
+                }
+                "DELETE_MILESTONE" -> {
+                    val title = params["title"]?.takeIf { it.isNotBlank() }
+                    if (title != null) {
+                        whatIfMilestoneList.removeAll { it.title.contains(title, ignoreCase = true) }
+                        appliedSummaries.add("Removed milestone '$title'")
+                    }
+                }
+                "UPDATE_PROFILE" -> {
+                    var cfg = appConfig
+                    params["person1name"]?.takeIf { it.isNotBlank() }?.let { cfg = cfg.copy(person1Name = it) }
+                    params["person2name"]?.takeIf { it.isNotBlank() }?.let { cfg = cfg.copy(person2Name = it) }
+                    params["iscouplemode"]?.toBooleanStrictOrNull()?.let { cfg = cfg.copy(isCoupleMode = it) }
+                    params["hassecondproperty"]?.toBooleanStrictOrNull()?.let { cfg = cfg.copy(hasSecondProperty = it) }
+                    saveAppConfig(cfg)
+                    appliedSummaries.add("Updated profile settings")
+                }
+            }
+        }
+
+        val cleanedText = rawResponse.replace(actionRegex, "").trim()
+        return Pair(cleanedText, appliedSummaries)
     }
 
     val headerSubtitle = remember(appConfig) {
@@ -1493,9 +2007,10 @@ fun ExpenseTrackerApp(
                     }
                 }
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // Horizontal Pager allowing left/right swipes between tabs
+                    // Horizontal Pager allowing left/right swipes between tabs (disabled on What-If/Settings so sliders slide freely)
                     HorizontalPager(
                         state = pagerState,
+                        userScrollEnabled = currentSection != AppSection.WHAT_IF && currentSection != AppSection.SETTINGS,
                         modifier = Modifier.fillMaxSize()
                     ) { page ->
                         val section = activeSections[page]
@@ -1544,7 +2059,6 @@ fun ExpenseTrackerApp(
                                     }
                                 },
                                 perPersonPropertyShare = perPersonPropertyShare,
-                                propertyBreakdownSummary = propertyBreakdownSummary,
                                 person1Items = person1Items,
                                 person2Items = person2Items,
                                 onAddPerson1 = { name, amt, iconName ->
@@ -1703,6 +2217,8 @@ fun ExpenseTrackerApp(
                                 person2Income = person2Income,
                                 person1Items = person1Items,
                                 person2Items = person2Items,
+                                prop1Items = prop1Items,
+                                prop2Items = prop2Items,
                                 prop1WeeklyMortgage = prop1WeeklyMortgage,
                                 prop2WeeklyMortgage = prop2WeeklyMortgage,
                                 prop1MarketValue = prop1EstimatedValue,
@@ -1713,18 +2229,22 @@ fun ExpenseTrackerApp(
                                 superAccountsList = superAccountsList,
                                 otherAssetsList = otherAssetsList,
                                 isWealthHidden = isWealthHidden,
-                                initialHorizonYears = whatIfHorizonYears,
+                                horizonYears = whatIfHorizonYears,
                                 onHorizonYearsChange = { whatIfHorizonYears = it },
-                                initialLifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
+                                lifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
                                 onLifestyleAdjustmentWeeklyChange = { whatIfLifestyleAdjustmentWeekly = it },
-                                initialRateShockProp1 = whatIfRateShockProp1,
+                                rateShockProp1 = whatIfRateShockProp1,
                                 onRateShockProp1Change = { whatIfRateShockProp1 = it },
-                                initialRateShockProp2 = whatIfRateShockProp2,
+                                rateShockProp2 = whatIfRateShockProp2,
                                 onRateShockProp2Change = { whatIfRateShockProp2 = it },
-                                initialRentalIncomeGrowthWeekly = whatIfRentalGrowthWeekly,
+                                rentalIncomeGrowthWeekly = whatIfRentalGrowthWeekly,
                                 onRentalIncomeGrowthWeeklyChange = { whatIfRentalGrowthWeekly = it },
+                                superBoostWeekly = whatIfSuperBoostWeekly,
+                                onSuperBoostWeeklyChange = { whatIfSuperBoostWeekly = it },
+                                customLevers = whatIfCustomLevers,
                                 milestoneList = whatIfMilestoneList,
-                                financialContextSummary = detailedFinancialContext
+                                financialContextSummary = detailedFinancialContext,
+                                onExecuteAiActions = ::executeAiActions
                             )
                             AppSection.SETTINGS -> SettingsScreen(
                                 appConfig = appConfig,
@@ -1748,7 +2268,12 @@ fun ExpenseTrackerApp(
                                 onRerunSetupWizard = {
                                     saveAppConfig(appConfig.copy(isSetupCompleted = false))
                                 },
-                                onSignOut = onSignOutUser
+                                onSignOut = onSignOutUser,
+                                prop1Loan = prop1Loan,
+                                prop2Loan = prop2Loan,
+                                isWealthHidden = isWealthHidden,
+                                onUpdateProp1Loan = { saveProp1Loan(it) },
+                                onUpdateProp2Loan = { saveProp2Loan(it) }
                             )
                         }
                     }
@@ -1759,13 +2284,26 @@ fun ExpenseTrackerApp(
                     ) {
                         topBarContent()
                     }
+                    if (appConfig.useExpnzAi) {
+                        FloatingAiAssistantWidget(
+                            financialContextSummary = detailedFinancialContext,
+                            personName = appConfig.person1Name,
+                            messages = geminiMessages,
+                            onAddImportedShares = { newParcels: List<ShareParcel> ->
+                                val updated = sharesList + newParcels
+                                saveSharesList(updated)
+                            },
+                            onExecuteAiActions = ::executeAiActions
+                        )
+                    }
                 }
             }
         } else {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Horizontal Pager for mobile layout
+                // Horizontal Pager for mobile layout (disabled on What-If/Settings so sliders slide freely)
                 HorizontalPager(
                     state = pagerState,
+                    userScrollEnabled = currentSection != AppSection.WHAT_IF && currentSection != AppSection.SETTINGS,
                     modifier = Modifier.fillMaxSize()
                 ) { page ->
                     val section = activeSections[page]
@@ -1972,6 +2510,8 @@ fun ExpenseTrackerApp(
                             person2Income = person2Income,
                             person1Items = person1Items,
                             person2Items = person2Items,
+                            prop1Items = prop1Items,
+                            prop2Items = prop2Items,
                             prop1WeeklyMortgage = prop1WeeklyMortgage,
                             prop2WeeklyMortgage = prop2WeeklyMortgage,
                             prop1MarketValue = prop1EstimatedValue,
@@ -1982,18 +2522,22 @@ fun ExpenseTrackerApp(
                             superAccountsList = superAccountsList,
                             otherAssetsList = otherAssetsList,
                             isWealthHidden = isWealthHidden,
-                            initialHorizonYears = whatIfHorizonYears,
+                            horizonYears = whatIfHorizonYears,
                             onHorizonYearsChange = { whatIfHorizonYears = it },
-                            initialLifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
+                            lifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
                             onLifestyleAdjustmentWeeklyChange = { whatIfLifestyleAdjustmentWeekly = it },
-                            initialRateShockProp1 = whatIfRateShockProp1,
+                            rateShockProp1 = whatIfRateShockProp1,
                             onRateShockProp1Change = { whatIfRateShockProp1 = it },
-                            initialRateShockProp2 = whatIfRateShockProp2,
+                            rateShockProp2 = whatIfRateShockProp2,
                             onRateShockProp2Change = { whatIfRateShockProp2 = it },
-                            initialRentalIncomeGrowthWeekly = whatIfRentalGrowthWeekly,
+                            rentalIncomeGrowthWeekly = whatIfRentalGrowthWeekly,
                             onRentalIncomeGrowthWeeklyChange = { whatIfRentalGrowthWeekly = it },
+                            superBoostWeekly = whatIfSuperBoostWeekly,
+                            onSuperBoostWeeklyChange = { whatIfSuperBoostWeekly = it },
+                            customLevers = whatIfCustomLevers,
                             milestoneList = whatIfMilestoneList,
-                            financialContextSummary = detailedFinancialContext
+                            financialContextSummary = detailedFinancialContext,
+                            onExecuteAiActions = ::executeAiActions
                         )
                         AppSection.SETTINGS -> SettingsScreen(
                             appConfig = appConfig,
@@ -2017,7 +2561,12 @@ fun ExpenseTrackerApp(
                             onRerunSetupWizard = {
                                 saveAppConfig(appConfig.copy(isSetupCompleted = false))
                             },
-                            onSignOut = onSignOutUser
+                            onSignOut = onSignOutUser,
+                            prop1Loan = prop1Loan,
+                            prop2Loan = prop2Loan,
+                            isWealthHidden = isWealthHidden,
+                            onUpdateProp1Loan = { saveProp1Loan(it) },
+                            onUpdateProp2Loan = { saveProp2Loan(it) }
                         )
                     }
                 }
@@ -2061,209 +2610,18 @@ fun ExpenseTrackerApp(
                     }
                 }
 
-                // Transparent Floating AI Assistant Bubble sitting above footer in bottom right of every tab
-                val prop1Val = prop1EstimatedValue
-                val prop2Val = if (appConfig.hasSecondProperty) prop2EstimatedValue else 0.0
-                val superVal = if (appConfig.showSuperAndShares) superAccountsList.sumOf { it.balance } else 0.0
-                val sharesVal = if (appConfig.showSuperAndShares) sharesList.sumOf { it.units * it.currentPrice } else 0.0
-                val otherVal = if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
-                val offsetsVal = if (appConfig.showLoans) prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0) else 0.0
-
-                val exactTotalAssets = prop1Val + prop2Val + superVal + sharesVal + otherVal + offsetsVal
-                val exactTotalLiabilities = prop1LiveBalance + prop2LiveBalance
-                val exactNetWorth = exactTotalAssets - exactTotalLiabilities
-
-                val p1TotalExpensesContext = perPersonPropertyShare + person1Items.sumOf { it.weeklyAmount }
-                val p1SurplusContext = person1Income + p1TotalExpensesContext
-                val p2TotalExpensesContext = if (appConfig.isCoupleMode) (perPersonPropertyShare + person2Items.sumOf { it.weeklyAmount }) else 0.0
-                val p2SurplusContext = if (appConfig.isCoupleMode) (person2Income + p2TotalExpensesContext) else 0.0
-                val combinedSurplusContext = p1SurplusContext + p2SurplusContext
-
-                val p1ExpensesListStr = person1Items.joinToString { "${it.name}: ${formatCurrency(
-                    abs(it.weeklyAmount), 2)}/wk" }
-                val p2ExpensesListStr = if (appConfig.isCoupleMode) person2Items.joinToString { "${it.name}: ${formatCurrency(
-                    abs(it.weeklyAmount), 2)}/wk" } else ""
-
-                // Compute What-If Projections for Global AI Context
-                val whatIfTotalRateShockCost = run {
-                    val bPmt1 = calculateFortnightlyRepayment(prop1Loan.originalLoanAmount, prop1Loan.interestRatePa)
-                    val sPmt1 = calculateFortnightlyRepayment(prop1Loan.originalLoanAmount, prop1Loan.interestRatePa + whatIfRateShockProp1)
-                    val j1 = (sPmt1 - bPmt1).coerceAtLeast(0.0) / 2.0
-
-                    val bPmt2 = calculateFortnightlyRepayment(prop2Loan.originalLoanAmount, prop2Loan.interestRatePa)
-                    val sPmt2 = calculateFortnightlyRepayment(prop2Loan.originalLoanAmount, prop2Loan.interestRatePa + whatIfRateShockProp2)
-                    val j2 = (sPmt2 - bPmt2).coerceAtLeast(0.0) / 2.0
-
-                    j1 + (if (appConfig.hasSecondProperty) j2 else 0.0)
+                if (appConfig.useExpnzAi) {
+                    FloatingAiAssistantWidget(
+                        financialContextSummary = detailedFinancialContext,
+                        personName = appConfig.person1Name,
+                        messages = geminiMessages,
+                        onAddImportedShares = { newParcels: List<ShareParcel> ->
+                            val updated = sharesList + newParcels
+                            saveSharesList(updated)
+                        },
+                        onExecuteAiActions = ::executeAiActions
+                    )
                 }
-
-                val whatIfBaseSurplusWeekly = run {
-                    val p1Exp = person1Items.sumOf { it.weeklyAmount }
-                    val p2Exp = if (appConfig.isCoupleMode) person2Items.sumOf { it.weeklyAmount } else 0.0
-                    val p1Surp = person1Income + p1Exp
-                    val p2Surp = if (appConfig.isCoupleMode) (person2Income + p2Exp) else 0.0
-                    p1Surp + p2Surp - prop1HousingCost - prop2HousingCost
-                }
-
-                val whatIfBaseAssets = exactTotalAssets
-                val whatIfBaseLiabilities = exactTotalLiabilities
-                val whatIfBaseNetWorth = exactNetWorth
-
-                val whatIfPathASeries = buildList {
-                    var currNW = whatIfBaseNetWorth
-                    var currAssets = whatIfBaseAssets
-                    var currLiab = whatIfBaseLiabilities
-                    add(currNW)
-                    for (y in 1..whatIfHorizonYears) {
-                        val annualSurplus = whatIfBaseSurplusWeekly * 52.0
-                        val assetGrowth = (sharesVal + superVal) * 0.075 + (prop1Val + prop2Val) * 0.04
-                        val debtPaydown = (currLiab * 0.035).coerceAtMost(currLiab)
-                        currLiab = (currLiab - debtPaydown).coerceAtLeast(0.0)
-                        currAssets += annualSurplus + assetGrowth
-                        currNW = currAssets - currLiab
-                        add(currNW)
-                    }
-                }
-
-                var whatIfDeficitYear: Int? = null
-                val whatIfPathBSeries = buildList {
-                    var currNW = whatIfBaseNetWorth
-                    var currAssets = whatIfBaseAssets
-                    var currLiab = whatIfBaseLiabilities
-                    var currLiquid = offsetsVal
-                    add(currNW)
-
-                    for (y in 1..whatIfHorizonYears) {
-                        var activeWeeklyDelta = whatIfLifestyleAdjustmentWeekly.toDouble() - whatIfTotalRateShockCost + whatIfRentalGrowthWeekly.toDouble()
-                        var activeAssetDelta = 0.0
-                        var activeLiabDelta = 0.0
-
-                        whatIfMilestoneList.filter { it.isEnabled }.forEach { m ->
-                            if (y >= m.startYear && y < m.startYear + m.durationYears) {
-                                activeWeeklyDelta += m.weeklyCashflowImpact
-                            }
-                            if (y == m.startYear) {
-                                activeAssetDelta += m.assetImpact
-                                activeLiabDelta += m.liabilityImpact
-                            }
-                        }
-
-                        val annualNetSurplus = (whatIfBaseSurplusWeekly + activeWeeklyDelta) * 52.0
-                        val assetGrowth = (sharesVal + superVal) * 0.075 + (prop1Val + prop2Val) * 0.04
-                        val debtPaydown = (currLiab * 0.035).coerceAtMost(currLiab)
-
-                        currLiquid += annualNetSurplus
-                        if (currLiquid < 0 && whatIfDeficitYear == null) {
-                            whatIfDeficitYear = y
-                        }
-
-                        currLiab = (currLiab + activeLiabDelta - debtPaydown).coerceAtLeast(0.0)
-                        currAssets += annualNetSurplus + assetGrowth + activeAssetDelta
-                        currNW = currAssets - currLiab
-                        add(currNW)
-                    }
-                }
-
-                val whatIfEndPathANetWorth = whatIfPathASeries.lastOrNull() ?: whatIfBaseNetWorth
-                val whatIfEndPathBNetWorth = whatIfPathBSeries.lastOrNull() ?: whatIfBaseNetWorth
-                val whatIfNetDifference = whatIfEndPathBNetWorth - whatIfEndPathANetWorth
-
-                val prop1ItemsStr = prop1Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" }
-                val prop2ItemsStr = if (appConfig.hasSecondProperty) prop2Items.joinToString { "${it.name}: ${formatCurrency(
-                    abs(it.weeklyAmount), 2)}/wk" } else ""
-
-                val detailedFinancialContext = buildString {
-                    append("EXPLICIT COMPUTED FINANCIAL TOTALS & UNMASKED GLOBAL APP DATA (DO NOT RECALCULATE): ")
-                    append("Exact Net Worth = ${formatCurrency(exactNetWorth, 2)}. ")
-                    append("Exact Total Assets = ${formatCurrency(exactTotalAssets, 2)} (Properties: ${formatCurrency(prop1Val + prop2Val, 0)}, Shares: ${formatCurrency(sharesVal, 0)}, Super: ${formatCurrency(superVal, 0)}, Other Assets: ${formatCurrency(otherVal, 0)}, Offset Accounts: ${formatCurrency(offsetsVal, 0)}). ")
-                    append("Exact Total Liabilities = ${formatCurrency(exactTotalLiabilities, 2)} (Property 1 Mortgage: ${formatCurrency(prop1LiveBalance, 0)}, Property 2 Mortgage: ${formatCurrency(prop2LiveBalance, 0)}). ")
-
-                    append("\n\n1. PERSONAL CASH FLOW TAB (UNMASKED): ")
-                    append("User (${appConfig.person1Name}): Income = ${formatCurrency(person1Income, 2)}/wk, Total Expenses = ${formatCurrency(
-                        abs(p1TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p1SurplusContext, 2)}/wk. ")
-                    if (p1ExpensesListStr.isNotBlank()) append("User Itemized Expenses: $p1ExpensesListStr. ")
-
-                    if (appConfig.isCoupleMode) {
-                        append("Partner (${appConfig.person2Name}): Income = ${formatCurrency(person2Income, 2)}/wk, Total Expenses = ${formatCurrency(
-                            abs(p2TotalExpensesContext), 2)}/wk, Net Surplus = ${formatCurrency(p2SurplusContext, 2)}/wk. ")
-                        if (p2ExpensesListStr.isNotBlank()) append("Partner Itemized Expenses: $p2ExpensesListStr. ")
-                        append("COMBINED WEEKLY NET SURPLUS = ${formatCurrency(combinedSurplusContext, 2)}/wk. ")
-                    }
-
-                    append("\n\n2. PROPERTIES TAB (UNMASKED): ")
-                    append("Property 1 (${appConfig.property1Name}): Market Value = ${formatCurrency(prop1Val, 0)}, Mortgage Balance = ${formatCurrency(prop1LiveBalance, 0)}, Net Equity = ${formatCurrency(prop1Val - prop1LiveBalance, 0)}, Status = ${if (appConfig.isProperty1Rented) "Rented (${formatCurrency(appConfig.primaryRentWeekly, 0)}/wk)" else "Owner Occupied"}. ")
-                    if (prop1ItemsStr.isNotBlank()) append("Property 1 Expenses: $prop1ItemsStr. ")
-
-                    if (appConfig.hasSecondProperty) {
-                        append("Property 2 (${appConfig.property2Name}): Market Value = ${formatCurrency(prop2Val, 0)}, Mortgage Balance = ${formatCurrency(prop2LiveBalance, 0)}, Net Equity = ${formatCurrency(prop2Val - prop2LiveBalance, 0)}, Status = ${if (appConfig.isProperty2Rented) "Rented (${formatCurrency(appConfig.secondaryRentWeekly, 0)}/wk)" else "Owner Occupied"}. ")
-                        if (prop2ItemsStr.isNotBlank()) append("Property 2 Expenses: $prop2ItemsStr. ")
-                    }
-
-                    append("\n\n3. LOANS & OFFSET TAB (UNMASKED AMORTIZATION): ")
-                    append("Property 1 Loan (${prop1Loan.name}): Original Loan = ${formatCurrency(prop1Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop1Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop1LiveBalance, 0)}, Interest Rate = ${prop1Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop1Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(
-                        max(0.0, prop1LiveBalance - prop1Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop1FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(
-                        abs(prop1WeeklyMortgage), 2)}. ")
-
-                    if (appConfig.hasSecondProperty) {
-                        append("Property 2 Loan (${prop2Loan.name}): Original Loan = ${formatCurrency(prop2Loan.originalLoanAmount, 0)}, Start Balance = ${formatCurrency(prop2Loan.startLoanBalance, 0)}, Remaining Balance = ${formatCurrency(prop2LiveBalance, 0)}, Interest Rate = ${prop2Loan.interestRatePa}%, Offset Balance = ${formatCurrency(prop2Loan.offsetBalance, 0)}, Net Balance Charging Interest = ${formatCurrency(
-                            max(0.0, prop2LiveBalance - prop2Loan.offsetBalance), 0)}, Fortnightly Repayment = ${formatCurrency(prop2FortnightlyPmt, 0)}, Weekly Equiv = ${formatCurrency(
-                            abs(prop2WeeklyMortgage), 2)}. ")
-                    }
-
-                    append("\n\n4. SUPER & SHARES TAB (UNMASKED): ")
-                    if (superAccountsList.isNotEmpty()) {
-                        append("Superannuation (Total ${formatCurrency(superVal, 0)}): ${superAccountsList.joinToString { "${it.fundName} (${it.owner}): ${formatCurrency(it.balance, 0)}" }}. ")
-                    }
-                    if (sharesList.isNotEmpty()) {
-                        val totalSharesCost = sharesList.sumOf { it.units * it.purchasePrice }
-                        val totalSharesGain = sharesVal - totalSharesCost
-                        append("Shares Portfolio (${sharesList.size} holdings, Total Market Value ${formatCurrency(sharesVal, 0)}, Cost Basis ${formatCurrency(totalSharesCost, 0)}, Net Gain/Loss ${formatCurrency(totalSharesGain, 0)}): ${sharesList.joinToString { "${it.code} (${it.owner}, ${it.units} units @ \$${it.currentPrice}, Purchase Price \$${it.purchasePrice}, Market Value ${formatCurrency(it.units * it.currentPrice, 0)}, Gain/Loss ${formatCurrency((it.currentPrice - it.purchasePrice) * it.units, 0)})" }}. ")
-                    }
-
-                    append("\n\n5. OTHER ASSETS TAB (UNMASKED): ")
-                    if (otherAssetsList.isNotEmpty()) {
-                        append("Other Assets (Total ${formatCurrency(otherVal, 0)}): ${otherAssetsList.joinToString { "${it.name} (${it.owner}): ${formatCurrency(it.value, 0)}" }}. ")
-                    }
-
-                    append("\n\n6. WHAT-IF SCENARIO SIMULATOR (ACTIVE PROJECTIONS & FUTURE ENTRIES): ")
-                    append("Active Timeframe = ${whatIfHorizonYears} Years. ")
-                    append("Extra Weekly Savings/Spending Adjustment = ${if (whatIfLifestyleAdjustmentWeekly >= 0) "+$" else "-$"}${abs(whatIfLifestyleAdjustmentWeekly)}/wk. ")
-                    append("Property 1 Rate Shock = +${whatIfRateShockProp1}%. ")
-                    if (appConfig.hasSecondProperty) append("Property 2 Rate Shock = +${whatIfRateShockProp2}%. ")
-                    if (whatIfRentalGrowthWeekly != 0f) append("Rental Income Growth = +$${whatIfRentalGrowthWeekly}/wk. ")
-
-                    val activeMilestones = whatIfMilestoneList.filter { it.isEnabled }
-                    val inactiveMilestones = whatIfMilestoneList.filter { !it.isEnabled }
-
-                    if (activeMilestones.isNotEmpty()) {
-                        append("Active Life Milestone Entries (${activeMilestones.size}): ${activeMilestones.joinToString { "${it.title} [Category: ${it.category.label}, Start Year: ${it.startYear}, Duration: ${it.durationYears} yrs, Weekly Cashflow Impact: ${if (it.weeklyCashflowImpact >= 0) "+" else ""}\$${it.weeklyCashflowImpact}/wk, Asset Impact: \$${it.assetImpact}, Liability Impact: \$${it.liabilityImpact}]" }}. ")
-                    } else {
-                        append("No active milestone entries selected. ")
-                    }
-                    if (inactiveMilestones.isNotEmpty()) {
-                        append("Available Inactive Milestone Options (${inactiveMilestones.size}): ${inactiveMilestones.joinToString { it.title }}. ")
-                    }
-
-                    append("Simulated Projection Results (${whatIfHorizonYears} Years): ")
-                    append("Path A (Status Quo Baseline Net Worth in ${whatIfHorizonYears} Yrs) = ${formatCurrency(whatIfEndPathANetWorth, 0)}. ")
-                    append("Path B (Simulated Future Plan Net Worth in ${whatIfHorizonYears} Yrs) = ${formatCurrency(whatIfEndPathBNetWorth, 0)}. ")
-                    append("Net Difference / Advantage = ${if (whatIfNetDifference >= 0) "+" else ""}${formatCurrency(whatIfNetDifference, 0)}. ")
-                    append("Cashflow Deficit Year = ${if (whatIfDeficitYear != null) "Year $whatIfDeficitYear (Cash reserves enter deficit)" else "None (Cash reserves remain positive)"}. ")
-                }
-
-                FloatingAiAssistantWidget(
-                    financialContextSummary = detailedFinancialContext,
-                    sharesList = sharesList,
-                    personName = appConfig.person1Name,
-                    messages = geminiMessages,
-                    onAddImportedShares = { newParcels: List<ShareParcel> ->
-                        val updated = sharesList + newParcels
-                        saveSharesList(updated)
-                    },
-                    onClearShares = {
-                        saveSharesList(emptyList())
-                    }
-                )
             }
         }
     }
@@ -2411,6 +2769,7 @@ fun OnboardingSetupScreen(
     var showTotalWealth by rememberSaveable { mutableStateOf(initialConfig.showTotalWealth) }
     var showCashFlow by rememberSaveable { mutableStateOf(initialConfig.showCashFlow) }
     var showProperties by rememberSaveable { mutableStateOf(initialConfig.showProperties) }
+    var useExpnzAi by rememberSaveable { mutableStateOf(initialConfig.useExpnzAi) }
     var showLoans by rememberSaveable { mutableStateOf(initialConfig.showLoans) }
     var showSuperAndShares by rememberSaveable { mutableStateOf(initialConfig.showSuperAndShares) }
     var showOtherAssets by rememberSaveable { mutableStateOf(initialConfig.showOtherAssets) }
@@ -2703,6 +3062,17 @@ fun OnboardingSetupScreen(
                             checked = showOtherAssets,
                             onCheckedChange = { showOtherAssets = it }
                         )
+
+                        HorizontalDivider()
+
+                        FeatureToggleRow(
+                            title = "EXPNZ AI Chatbot (Gemini)",
+                            subtitle = "Use the built-in AI assistant to ask financial advice and interact with your dashboard data directly",
+                            icon = Icons.AutoMirrored.Filled.Chat,
+                            accent = BrandCoralPink,
+                            checked = useExpnzAi,
+                            onCheckedChange = { useExpnzAi = it }
+                        )
                     }
                 }
             }
@@ -2733,16 +3103,17 @@ fun OnboardingSetupScreen(
                             shape = RoundedCornerShape(12.dp)
                         )
 
+                        Text("Do you own this property (or have a mortgage) or do you rent it?", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             FilterChip(
                                 selected = !isProperty1Rented,
                                 onClick = { isProperty1Rented = false },
-                                label = { Text("Own") }
+                                label = { Text("Own / Mortgage") }
                             )
                             FilterChip(
                                 selected = isProperty1Rented,
                                 onClick = { isProperty1Rented = true },
-                                label = { Text("Rent") }
+                                label = { Text("Rent (Tenant)") }
                             )
                         }
 
@@ -2833,18 +3204,19 @@ fun OnboardingSetupScreen(
                                         modifier = Modifier.fillMaxWidth(),
                                         shape = RoundedCornerShape(12.dp)
                                     )
-                                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        FilterChip(
-                                            selected = !isProperty2Rented,
-                                            onClick = { isProperty2Rented = false },
-                                            label = { Text("Own") }
-                                        )
-                                        FilterChip(
-                                            selected = isProperty2Rented,
-                                            onClick = { isProperty2Rented = true },
-                                            label = { Text("Rent") }
-                                        )
-                                    }
+                                        Text("Is this an investment property or a holiday home you own, or are you renting it as a tenant?", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            FilterChip(
+                                                selected = !isProperty2Rented,
+                                                onClick = { isProperty2Rented = false },
+                                                label = { Text("Own / Investment") }
+                                            )
+                                            FilterChip(
+                                                selected = isProperty2Rented,
+                                                onClick = { isProperty2Rented = true },
+                                                label = { Text("Rent (Tenant)") }
+                                            )
+                                        }
                                 }
                             }
                         } else {
@@ -2994,7 +3366,8 @@ fun OnboardingSetupScreen(
                                 showProperties = showProperties,
                                 showSuperAndShares = showSuperAndShares,
                                 showOtherAssets = showOtherAssets,
-                                showLoans = showLoans
+                                showLoans = showLoans,
+                                useExpnzAi = useExpnzAi
                             )
                             val supers = customSuperAccounts.toList()
                             val shares = customShares.toList()
@@ -3474,7 +3847,7 @@ fun BiometricLockScreen(
 }
 
 // ============================================================================
-// SETTINGS SCREEN (WITH DYNAMIC MENU TOGGLES & PROFILE CUSTOMIZATION)
+// SETTINGS SCREEN (WITH HOME LOANS & OFFSET, DYNAMIC MENU TOGGLES & PROFILE)
 // ============================================================================
 @Composable
 fun SettingsScreen(
@@ -3486,12 +3859,77 @@ fun SettingsScreen(
     isBiometricEnabled: Boolean,
     onBiometricChange: (Boolean) -> Unit,
     onRerunSetupWizard: () -> Unit,
-    onSignOut: (() -> Unit)? = null
+    onSignOut: (() -> Unit)? = null,
+    prop1Loan: LoanConfig = LoanConfig("Property 1", "2024-01-01", 600000.0, 30, 580000.0, 28.0, 6.15, 25000.0),
+    prop2Loan: LoanConfig = LoanConfig("Property 2", "2024-01-01", 500000.0, 30, 480000.0, 28.0, 6.25, 10000.0),
+    isWealthHidden: Boolean = false,
+    onUpdateProp1Loan: (LoanConfig) -> Unit = {},
+    onUpdateProp2Loan: (LoanConfig) -> Unit = {}
 ) {
     val context = LocalContext.current
     val auth = remember { FirebaseAuth.getInstance() }
     val user = auth.currentUser
     var showEditProfileDialog by remember { mutableStateOf(false) }
+    var showLoansSubScreen by rememberSaveable { mutableStateOf(false) }
+
+    fun maskVal(amt: Double, decimals: Int = 0): String =
+        if (isWealthHidden) "$ ••••••" else formatCurrency(amt, decimals)
+
+    if (showLoansSubScreen) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            LoansAndOffsetScreen(
+                appConfig = appConfig,
+                prop1Loan = prop1Loan,
+                prop2Loan = prop2Loan,
+                isWealthHidden = isWealthHidden,
+                onUpdateProp1 = onUpdateProp1Loan,
+                onUpdateProp2 = onUpdateProp2Loan,
+                topPadding = 168.dp
+            )
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 104.dp, start = 16.dp, end = 16.dp),
+                shape = RoundedCornerShape(14.dp),
+                color = BrandForestDark,
+                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f)),
+                tonalElevation = 6.dp
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    TextButton(
+                        onClick = { showLoansSubScreen = false },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back to Settings",
+                            tint = BrandCoralPink,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Back to Settings", color = BrandCoralPink, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                    }
+                    Text(
+                        "Home Loans & Offset",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
+        return
+    }
+
+    val p1AutoFn = remember(prop1Loan.startDateStr) { getElapsedFortnightsSinceStart(prop1Loan.startDateStr) }
+    val p1Sched = remember(prop1Loan) { generateAmortizationSchedule(prop1Loan, 780) }
+    val p1Balance = (p1Sched.getOrNull(p1AutoFn.coerceIn(0, p1Sched.size - 1)) ?: p1Sched.first()).closingBalance
 
     LazyColumn(
         modifier = Modifier
@@ -3500,6 +3938,105 @@ fun SettingsScreen(
         contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // SECTION 0: HOME LOANS & OFFSET AMORTIZATION (MOVED FROM FOOTER TO SETTINGS)
+        item {
+            Card(
+                onClick = { showLoansSubScreen = true },
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.4f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = BrandCoralPink.copy(alpha = 0.18f),
+                                modifier = Modifier.size(44.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.QueryStats,
+                                    contentDescription = null,
+                                    tint = BrandCoralPink,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    "Home Loans & Offset",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    "Amortization schedule, interest rates & offset simulator",
+                                    fontSize = 12.sp,
+                                    color = SlateGray
+                                )
+                            }
+                        }
+                        Icon(
+                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "Open Home Loans & Offset",
+                            tint = BrandCoralPink
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(prop1Loan.name, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SlateGray)
+                                Text(maskVal(p1Balance, 0), fontSize = 15.sp, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("Interest Rate", fontSize = 11.sp, color = SlateGray)
+                                Text("${String.format(Locale.getDefault(), "%.2f", prop1Loan.interestRatePa)}% p.a.", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text("Offset Balance", fontSize = 11.sp, color = SlateGray)
+                                Text(maskVal(prop1Loan.offsetBalance, 0), fontSize = 14.sp, fontWeight = FontWeight.Bold, color = BrandMintGreen)
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = { showLoansSubScreen = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
+                    ) {
+                        Icon(Icons.Default.QueryStats, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Open Home Loans & Offset Tracker", fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
+        }
+
         // SECTION 1: MODULE & MENU TOGGLES
         item {
             Card(
@@ -3546,8 +4083,8 @@ fun SettingsScreen(
                     )
 
                     FeatureToggleRow(
-                        title = "Home Loans & Offset Amortization",
-                        subtitle = "Fortnightly mortgage payoff schedule & offset simulator",
+                        title = "Include Home Loans & Offset in Wealth",
+                        subtitle = "Include mortgage balances & offsets in net worth calculations",
                         icon = Icons.Default.QueryStats,
                         accent = BrandCoralLight,
                         checked = appConfig.showLoans,
@@ -3583,7 +4120,7 @@ fun SettingsScreen(
 
                     FeatureToggleRow(
                         title = "Scenario Simulator (What-If)",
-                        subtitle = "Parallel universe wealth modeling, life milestone stacking & rate shocks",
+                        subtitle = "Australian wealth modeling, RBA rate levers & custom milestones",
                         icon = Icons.Default.Science,
                         accent = Color(appConfig.colorWhatIfHex),
                         checked = appConfig.showWhatIf,
@@ -3750,8 +4287,6 @@ fun SettingsScreen(
                 }
             }
         }
-
-
 
         item {
             Card(
@@ -4300,7 +4835,6 @@ fun PropertiesScreen(
 
     var showAddDialog by remember { mutableStateOf(false) }
     var itemToEdit by remember { mutableStateOf<CashflowItem?>(null) }
-    var showValuationDialog by remember { mutableStateOf(false) }
     var showAddressEditDialog by remember { mutableStateOf(false) }
     var sortBy by remember { mutableStateOf("Default") }
 
@@ -4308,11 +4842,13 @@ fun PropertiesScreen(
 
 
 
-    val prop1HousingCost = if (appConfig.isProperty1Rented) appConfig.primaryRentWeekly else prop1WeeklyMortgage
+    val prop1HousingCost = if (appConfig.isProperty1Rented) -appConfig.primaryRentWeekly else prop1WeeklyMortgage
     val prop1Net = prop1HousingCost + prop1Items.sumOf { it.weeklyAmount }
 
-    val prop2HousingCost = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) appConfig.secondaryRentWeekly else prop2WeeklyMortgage
-    val prop2Net = if (appConfig.hasSecondProperty) (prop2HousingCost + prop2Items.sumOf { it.weeklyAmount }) else 0.0
+    val prop2RentIncome = if (appConfig.hasSecondProperty) appConfig.secondaryRentWeekly else 0.0
+    val prop2Mortgage = if (appConfig.hasSecondProperty) prop2WeeklyMortgage else 0.0
+    val prop2Expenses = if (appConfig.hasSecondProperty) prop2Items.sumOf { it.weeklyAmount } else 0.0
+    val prop2Net = prop2RentIncome + prop2Mortgage + prop2Expenses
 
     LazyColumn(
         modifier = Modifier
@@ -4634,28 +5170,29 @@ fun PropertiesScreen(
 
         item {
             val isProp1 = selectedProperty == 0
-            val isRented = if (isProp1) appConfig.isProperty1Rented else appConfig.isProperty2Rented
+            val isRented = if (isProp1) appConfig.isProperty1Rented else (appConfig.isProperty2Rented || appConfig.secondaryRentWeekly > 0.0)
             if (isRented) {
                 var showRentEditDialog by remember { mutableStateOf(false) }
-                val currentRent = if (isProp1) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
+                val currentRentAmt = if (isProp1) -appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
                 ExpenseItemCard(
                     item = CashflowItem(
                         id = "rent_sync",
                         name = "Weekly Gross Rent",
-                        weeklyAmount = currentRent,
+                        weeklyAmount = currentRentAmt,
                         isLockedMortgageOrPropertyLink = true,
                         iconName = "Home"
                     ),
-                    accentColor = BrandMintGreen,
+                    accentColor = if (currentRentAmt >= 0) BrandMintGreen else BrandCoralPink,
                     isWealthHidden = isWealthHidden,
                     onEdit = { showRentEditDialog = true },
                     onDelete = null
                 )
                 if (showRentEditDialog) {
+                    val editRentBase = if (isProp1) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
                     EditSingleValueDialog(
                         title = "Update Weekly Rent Amount",
                         label = "Weekly Rent ($)",
-                        initialValue = currentRent,
+                        initialValue = editRentBase,
                         onDismiss = { showRentEditDialog = false },
                         onConfirm = { newRent ->
                             if (isProp1) {
@@ -4667,7 +5204,8 @@ fun PropertiesScreen(
                         }
                     )
                 }
-            } else if (appConfig.showLoans) {
+            }
+            if (appConfig.showLoans) {
                 val weeklyMort = if (selectedProperty == 0) prop1WeeklyMortgage else prop2WeeklyMortgage
                 ExpenseItemCard(
                     item = CashflowItem(
@@ -4796,7 +5334,8 @@ fun LoansAndOffsetScreen(
     prop2Loan: LoanConfig,
     isWealthHidden: Boolean = false,
     onUpdateProp1: (LoanConfig) -> Unit,
-    onUpdateProp2: (LoanConfig) -> Unit
+    onUpdateProp2: (LoanConfig) -> Unit,
+    topPadding: Dp = 115.dp
 ) {
     var selectedLoanIndex by remember { mutableIntStateOf(0) }
     LaunchedEffect(appConfig.hasSecondProperty) {
@@ -4836,7 +5375,7 @@ fun LoansAndOffsetScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
+        contentPadding = PaddingValues(top = topPadding, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         if (appConfig.hasSecondProperty) {
@@ -4954,7 +5493,7 @@ fun LoansAndOffsetScreen(
         }
 
         item {
-            val fnPmt = calculateFortnightlyRepayment(activeLoan.originalLoanAmount, activeLoan.interestRatePa)
+            val fnPmt = calculateEffectiveFortnightlyRepayment(activeLoan)
             val wkPmt = fnPmt / 2.0
 
             Card(
@@ -5127,14 +5666,14 @@ fun LoansAndOffsetScreen(
 }
 
 // ============================================================================
-// SMART WHAT-IF FINANCIAL SCENARIO SIMULATOR
+// AUSTRALIAN WHAT-IF WEALTH & SCENARIO EXPLORER
 // ============================================================================
 
 enum class MilestoneCategory(val label: String, val icon: ImageVector, val defaultColor: Color) {
-    PROPERTY("Real Estate & Housing", Icons.Default.HomeWork, BrandCoralPink),
-    CAREER("Career & Leave", Icons.Default.Work, BrandMintGreen),
-    PURCHASE("Major Purchase", Icons.Default.DirectionsCar, BrandWarmAmber),
-    INVESTMENT("Wealth & Investing", Icons.AutoMirrored.Filled.TrendingUp, BrandSkyBlue)
+    PROPERTY("Property & Housing", Icons.Default.HomeWork, BrandCoralPink),
+    CAREER("Career, Pay & Leave", Icons.Default.Work, BrandMintGreen),
+    PURCHASE("Lifestyle & Purchases", Icons.Default.DirectionsCar, BrandWarmAmber),
+    INVESTMENT("Super, ETFs & Investing", Icons.AutoMirrored.Filled.TrendingUp, BrandSkyBlue)
 }
 
 data class LifeMilestoneBlock(
@@ -5149,7 +5688,26 @@ data class LifeMilestoneBlock(
     var isEnabled: Boolean = true
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+private data class AussieScenarioTile(
+    val id: String,
+    val title: String,
+    val badge: String,
+    val icon: ImageVector,
+    val color: Color,
+    val onApply: () -> Unit
+)
+
+private data class AussieMilestoneTemplate(
+    val label: String,
+    val title: String,
+    val category: MilestoneCategory,
+    val startYear: Int,
+    val durationYears: Int,
+    val weeklyCashflow: Double,
+    val assetImpact: Double,
+    val liabilityImpact: Double
+)
+
 @Composable
 fun WhatIfScenarioScreen(
     appConfig: UserAppConfig,
@@ -5157,6 +5715,8 @@ fun WhatIfScenarioScreen(
     person2Income: Double,
     person1Items: List<CashflowItem>,
     person2Items: List<CashflowItem>,
+    prop1Items: List<CashflowItem> = emptyList(),
+    prop2Items: List<CashflowItem> = emptyList(),
     prop1WeeklyMortgage: Double,
     prop2WeeklyMortgage: Double,
     prop1MarketValue: Double,
@@ -5167,39 +5727,30 @@ fun WhatIfScenarioScreen(
     superAccountsList: List<SuperAccount>,
     otherAssetsList: List<OtherAsset>,
     isWealthHidden: Boolean,
-    initialHorizonYears: Int = 15,
+    horizonYears: Int = 15,
     onHorizonYearsChange: (Int) -> Unit = {},
-    initialLifestyleAdjustmentWeekly: Float = 0f,
+    lifestyleAdjustmentWeekly: Float = 0f,
     onLifestyleAdjustmentWeeklyChange: (Float) -> Unit = {},
-    initialRateShockProp1: Float = 0f,
+    rateShockProp1: Float = 0f,
     onRateShockProp1Change: (Float) -> Unit = {},
-    initialRateShockProp2: Float = 0f,
+    rateShockProp2: Float = 0f,
     onRateShockProp2Change: (Float) -> Unit = {},
-    initialRentalIncomeGrowthWeekly: Float = 0f,
+    rentalIncomeGrowthWeekly: Float = 0f,
     onRentalIncomeGrowthWeeklyChange: (Float) -> Unit = {},
+    superBoostWeekly: Float = 0f,
+    onSuperBoostWeeklyChange: (Float) -> Unit = {},
+    customLevers: SnapshotStateList<CustomWhatIfLever> = remember { mutableStateListOf() },
     milestoneList: SnapshotStateList<LifeMilestoneBlock> = remember { mutableStateListOf() },
-    financialContextSummary: String = ""
+    financialContextSummary: String = "",
+    onExecuteAiActions: (String) -> Pair<String, List<String>> = { it to emptyList() }
 ) {
     fun maskVal(valAmt: Double, decimals: Int = 0): String {
         return if (isWealthHidden) "$ ••••••" else formatCurrency(valAmt, decimals)
     }
 
-    // Local Simulation Controls
-    var horizonYears by remember { mutableIntStateOf(initialHorizonYears) }
-    var lifestyleAdjustmentWeekly by remember { mutableFloatStateOf(initialLifestyleAdjustmentWeekly) }
-    var rateShockProp1 by remember { mutableFloatStateOf(initialRateShockProp1) }
-    var rateShockProp2 by remember { mutableFloatStateOf(initialRateShockProp2) }
-    var rentalIncomeGrowthWeekly by remember { mutableFloatStateOf(initialRentalIncomeGrowthWeekly) }
+    var activeScenarioId by rememberSaveable { mutableStateOf("status_quo") }
 
-    LaunchedEffect(horizonYears, lifestyleAdjustmentWeekly, rateShockProp1, rateShockProp2, rentalIncomeGrowthWeekly) {
-        onHorizonYearsChange(horizonYears)
-        onLifestyleAdjustmentWeeklyChange(lifestyleAdjustmentWeekly)
-        onRateShockProp1Change(rateShockProp1)
-        onRateShockProp2Change(rateShockProp2)
-        onRentalIncomeGrowthWeeklyChange(rentalIncomeGrowthWeekly)
-    }
-
-    // Baseline Financial Calculations
+    // Baseline Financial Calculations (matching Total Wealth & Cash Flow tabs)
     val totalPropertyVal = if (appConfig.showProperties) {
         prop1MarketValue + (if (appConfig.hasSecondProperty) prop2MarketValue else 0.0)
     } else 0.0
@@ -5213,12 +5764,12 @@ fun WhatIfScenarioScreen(
     val totalAssets = totalPropertyVal + totalSuperVal + totalSharesVal + totalOtherAssetsVal + totalOffsets
 
     val p1AutoFortnights = getElapsedFortnightsSinceStart(prop1Loan.startDateStr)
-    val p1Schedule = generateAmortizationSchedule(prop1Loan, 780)
+    val p1Schedule = remember(prop1Loan) { generateAmortizationSchedule(prop1Loan, 780) }
     val p1CurrentRow = p1Schedule.getOrNull(p1AutoFortnights.coerceIn(0, p1Schedule.size - 1)) ?: p1Schedule.first()
     val p1LiveBalance = if (appConfig.showLoans) p1CurrentRow.closingBalance else 0.0
 
     val p2AutoFortnights = getElapsedFortnightsSinceStart(prop2Loan.startDateStr)
-    val p2Schedule = generateAmortizationSchedule(prop2Loan, 780)
+    val p2Schedule = remember(prop2Loan) { generateAmortizationSchedule(prop2Loan, 780) }
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
     val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty) p2CurrentRow.closingBalance else 0.0
 
@@ -5227,106 +5778,260 @@ fun WhatIfScenarioScreen(
 
     val p1Expenses = person1Items.sumOf { it.weeklyAmount }
     val p2Expenses = if (appConfig.isCoupleMode) person2Items.sumOf { it.weeklyAmount } else 0.0
-    val netWeeklyRent1 = appConfig.primaryRentWeekly
-    val prop1Housing = if (appConfig.isProperty1Rented) -netWeeklyRent1 else prop1WeeklyMortgage
-    val prop2Housing = if (appConfig.hasSecondProperty && appConfig.isProperty2Rented) -appConfig.secondaryRentWeekly else prop2WeeklyMortgage
+    val prop1HousingCost = if (appConfig.isProperty1Rented) -appConfig.primaryRentWeekly else prop1WeeklyMortgage
+    val prop1NetWeekly = prop1HousingCost + prop1Items.sumOf { it.weeklyAmount }
+    val prop2NetWeekly = if (appConfig.hasSecondProperty) {
+        appConfig.secondaryRentWeekly + prop2WeeklyMortgage + prop2Items.sumOf { it.weeklyAmount }
+    } else 0.0
 
     val p1Surplus = person1Income + p1Expenses
     val p2Surplus = if (appConfig.isCoupleMode) (person2Income + p2Expenses) else 0.0
-    val baseSurplusWeekly = p1Surplus + p2Surplus - prop1Housing - prop2Housing
+    val baseSurplusWeekly = p1Surplus + p2Surplus + prop1NetWeekly + prop2NetWeekly
 
-    // Simulation Controls
-    var showGuide by remember { mutableStateOf(true) }
+    // Dialog & AI States
     var showAddMilestoneDialog by remember { mutableStateOf(false) }
+    var prefillTemplate by remember { mutableStateOf<AussieMilestoneTemplate?>(null) }
     var milestoneToEdit by remember { mutableStateOf<LifeMilestoneBlock?>(null) }
+    var showAddCustomLeverDialog by remember { mutableStateOf(false) }
+    var customLeverToEdit by remember { mutableStateOf<CustomWhatIfLever?>(null) }
     var whatIfChatInput by remember { mutableStateOf("") }
     val whatIfChatHistory = remember { mutableStateListOf<ChatMessage>() }
     var isWhatIfAiLoading by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Rate Shock Math (Per Loan)
-    val baseRate1 = prop1Loan.interestRatePa
-    val shockedRate1 = baseRate1 + rateShockProp1
-    val basePmt1 = calculateFortnightlyRepayment(prop1Loan.originalLoanAmount, baseRate1)
-    val shockedPmt1 = calculateFortnightlyRepayment(prop1Loan.originalLoanAmount, shockedRate1)
-    val jump1 = (shockedPmt1 - basePmt1).coerceAtLeast(0.0) / 2.0
-
-    val baseRate2 = prop2Loan.interestRatePa
-    val shockedRate2 = baseRate2 + rateShockProp2
-    val basePmt2 = calculateFortnightlyRepayment(prop2Loan.originalLoanAmount, baseRate2)
-    val shockedPmt2 = calculateFortnightlyRepayment(prop2Loan.originalLoanAmount, shockedRate2)
-    val jump2 = (shockedPmt2 - basePmt2).coerceAtLeast(0.0) / 2.0
-
-    val totalWeeklyRateShockCost = jump1 + (if (appConfig.hasSecondProperty) jump2 else 0.0)
-
-    // Multi-Year Simulation Projections
-    val pathASeries = remember(baseNetWorth, baseSurplusWeekly, horizonYears, totalSharesVal, totalSuperVal, totalPropertyVal, totalLiabilities) {
-        val series = mutableListOf<Double>()
-        var currNW = baseNetWorth
-        var currAssets = totalAssets
-        var currLiab = totalLiabilities
-        series.add(currNW)
-        for (y in 1..horizonYears) {
-            val annualSurplus = baseSurplusWeekly * 52.0
-            val assetGrowth = (totalSharesVal + totalSuperVal) * 0.075 + (totalPropertyVal * 0.04)
-            val debtPaydown = (currLiab * 0.035).coerceAtMost(currLiab)
-            currLiab = (currLiab - debtPaydown).coerceAtLeast(0.0)
-            currAssets += annualSurplus + assetGrowth
-            currNW = currAssets - currLiab
-            series.add(currNW)
-        }
-        series
+    val milestoneFingerprint = milestoneList.map {
+        "${it.id}_${it.title}_${it.startYear}_${it.durationYears}_${it.weeklyCashflowImpact}_${it.assetImpact}_${it.liabilityImpact}_${it.isEnabled}"
+    }
+    val customLeversFingerprint = customLevers.map {
+        "${it.id}_${it.title}_${it.impactType}_${it.minValue}_${it.maxValue}_${it.stepSize}_${it.currentValue}_${it.isEnabled}"
     }
 
-    val (pathBSeries, deficitYear) = remember(
-        baseNetWorth, baseSurplusWeekly, horizonYears, lifestyleAdjustmentWeekly, totalWeeklyRateShockCost, rentalIncomeGrowthWeekly,
-        milestoneList.map { Pair(it.id, it.isEnabled) }
+    val proj = remember(
+        baseNetWorth, baseSurplusWeekly, horizonYears,
+        totalSharesVal, totalSuperVal, totalPropertyVal, totalOtherAssetsVal, totalOffsets, totalLiabilities,
+        appConfig.showLoans, appConfig.hasSecondProperty, prop1Loan, prop2Loan,
+        lifestyleAdjustmentWeekly, rateShockProp1, rateShockProp2, rentalIncomeGrowthWeekly, superBoostWeekly,
+        milestoneFingerprint, customLeversFingerprint
     ) {
-        val series = mutableListOf<Double>()
-        var currNW = baseNetWorth
-        var currAssets = totalAssets
-        var currLiab = totalLiabilities
-        var currLiquid = totalOffsets
-        var foundDeficitYear: Int? = null
-
-        series.add(currNW)
-
-        for (y in 1..horizonYears) {
-            var activeWeeklyCashflowDelta = lifestyleAdjustmentWeekly.toDouble() - totalWeeklyRateShockCost + rentalIncomeGrowthWeekly.toDouble()
-            var activeAssetDelta = 0.0
-            var activeLiabDelta = 0.0
-
-            milestoneList.filter { it.isEnabled }.forEach { m ->
-                if (y >= m.startYear && y < m.startYear + m.durationYears) {
-                    activeWeeklyCashflowDelta += m.weeklyCashflowImpact
-                }
-                if (y == m.startYear) {
-                    activeAssetDelta += m.assetImpact
-                    activeLiabDelta += m.liabilityImpact
-                }
-            }
-
-            val annualNetSurplus = (baseSurplusWeekly + activeWeeklyCashflowDelta) * 52.0
-            val assetGrowth = (totalSharesVal + totalSuperVal) * 0.075 + (totalPropertyVal * 0.04)
-            val debtPaydown = (currLiab * 0.035).coerceAtMost(currLiab)
-
-            currLiquid += annualNetSurplus
-            if (currLiquid < 0 && foundDeficitYear == null) {
-                foundDeficitYear = y
-            }
-
-            currLiab = (currLiab + activeLiabDelta - debtPaydown).coerceAtLeast(0.0)
-            currAssets += annualNetSurplus + assetGrowth + activeAssetDelta
-            currNW = currAssets - currLiab
-            series.add(currNW)
-        }
-
-        Pair(series, foundDeficitYear)
+        computeWhatIfProjection(
+            horizonYears = horizonYears,
+            basePropertyVal = totalPropertyVal,
+            baseSharesAndSuperVal = totalSharesVal + totalSuperVal,
+            baseOtherAssetsVal = totalOtherAssetsVal,
+            baseOffsetsVal = totalOffsets,
+            baseLiabilitiesVal = totalLiabilities,
+            baseSurplusWeekly = baseSurplusWeekly,
+            prop1Loan = prop1Loan,
+            prop2Loan = prop2Loan,
+            hasSecondProperty = appConfig.hasSecondProperty,
+            showLoans = appConfig.showLoans,
+            lifestyleAdjustmentWeekly = lifestyleAdjustmentWeekly,
+            rateShockProp1 = rateShockProp1,
+            rateShockProp2 = rateShockProp2,
+            rentalIncomeGrowthWeekly = rentalIncomeGrowthWeekly,
+            superBoostWeekly = superBoostWeekly,
+            customLevers = customLevers.toList(),
+            milestones = milestoneList.toList()
+        )
     }
+
+    val pathASeries = proj.pathASeries
+    val pathBSeries = proj.pathBSeries
+    val deficitYear = proj.deficitYear
+    val weeklyMortgageDelta1 = proj.weeklyRateDeltaProp1
+    val weeklyMortgageDelta2 = proj.weeklyRateDeltaProp2
+    val totalWeeklyRateShockCost = proj.totalWeeklyRateDeltaCost
 
     val endPathANetWorth = pathASeries.lastOrNull() ?: baseNetWorth
     val endPathBNetWorth = pathBSeries.lastOrNull() ?: baseNetWorth
     val netWorthDifference = endPathBNetWorth - endPathANetWorth
+
+    val year1MilestoneWeekly = milestoneList.filter { it.isEnabled && it.startYear <= 1 }.sumOf { it.weeklyCashflowImpact }
+    val weeklyCashflowDeltaNow =
+        lifestyleAdjustmentWeekly.toDouble() - totalWeeklyRateShockCost + rentalIncomeGrowthWeekly.toDouble() + proj.customWeeklyCashflowTotal + year1MilestoneWeekly
+    val simulatedWeeklySurplusNow = baseSurplusWeekly + weeklyCashflowDeltaNow
+
+    val hasAnyChanges = lifestyleAdjustmentWeekly != 0f ||
+            rateShockProp1 != 0f ||
+            rateShockProp2 != 0f ||
+            rentalIncomeGrowthWeekly != 0f ||
+            superBoostWeekly != 0f ||
+            customLevers.any { it.isEnabled && abs(it.currentValue) > 0.001f } ||
+            milestoneList.any { it.isEnabled }
+
+    fun resetAllToStatusQuo() {
+        activeScenarioId = "status_quo"
+        onLifestyleAdjustmentWeeklyChange(0f)
+        onRateShockProp1Change(0f)
+        onRateShockProp2Change(0f)
+        onRentalIncomeGrowthWeeklyChange(0f)
+        onSuperBoostWeeklyChange(0f)
+        customLevers.forEachIndexed { idx, cl ->
+            customLevers[idx] = cl.copy(currentValue = 0f)
+        }
+        milestoneList.clear()
+    }
+
+    // Australian Square Tiles Scenario Explorer
+    val scenarioTiles = listOf(
+        AussieScenarioTile(
+            id = "status_quo",
+            title = "Status Quo",
+            badge = "Baseline",
+            icon = Icons.Default.Refresh,
+            color = SlateGray,
+            onApply = { resetAllToStatusQuo() }
+        ),
+        AussieScenarioTile(
+            id = "rba_cut",
+            title = "RBA Rate Cut",
+            badge = "-0.50% (2 Cuts)",
+            icon = Icons.AutoMirrored.Filled.TrendingDown,
+            color = BrandMintGreen,
+            onApply = {
+                activeScenarioId = "rba_cut"
+                onLifestyleAdjustmentWeeklyChange(0f)
+                onRateShockProp1Change(-0.5f)
+                onRateShockProp2Change(if (appConfig.hasSecondProperty) -0.5f else 0f)
+                onRentalIncomeGrowthWeeklyChange(0f)
+                onSuperBoostWeeklyChange(0f)
+                milestoneList.clear()
+            }
+        ),
+        AussieScenarioTile(
+            id = "offset_smash",
+            title = "Offset Smash",
+            badge = "+$200/wk Saved",
+            icon = Icons.Default.Savings,
+            color = BrandSkyBlue,
+            onApply = {
+                activeScenarioId = "offset_smash"
+                onLifestyleAdjustmentWeeklyChange(200f)
+                onRateShockProp1Change(0f)
+                onRateShockProp2Change(0f)
+                onRentalIncomeGrowthWeeklyChange(0f)
+                onSuperBoostWeeklyChange(0f)
+                milestoneList.clear()
+            }
+        ),
+        AussieScenarioTile(
+            id = "super_boost",
+            title = "Super Boost",
+            badge = "+$150/wk Sacr.",
+            icon = Icons.Default.AccountBalance,
+            color = BrandPurple,
+            onApply = {
+                activeScenarioId = "super_boost"
+                onLifestyleAdjustmentWeeklyChange(0f)
+                onRateShockProp1Change(0f)
+                onRateShockProp2Change(0f)
+                onRentalIncomeGrowthWeeklyChange(0f)
+                onSuperBoostWeeklyChange(150f)
+                milestoneList.clear()
+            }
+        ),
+        AussieScenarioTile(
+            id = "rba_hike",
+            title = "RBA Rate Stress",
+            badge = "+1.00% (4 Hikes)",
+            icon = Icons.AutoMirrored.Filled.TrendingUp,
+            color = BrandWarmAmber,
+            onApply = {
+                activeScenarioId = "rba_hike"
+                onLifestyleAdjustmentWeeklyChange(0f)
+                onRateShockProp1Change(1.0f)
+                onRateShockProp2Change(if (appConfig.hasSecondProperty) 1.0f else 0f)
+                onRentalIncomeGrowthWeeklyChange(0f)
+                onSuperBoostWeeklyChange(0f)
+                milestoneList.clear()
+            }
+        ),
+        AussieScenarioTile(
+            id = "inv_property",
+            title = "Buy Inv. Property",
+            badge = "$750k in Yr 2",
+            icon = Icons.Default.HomeWork,
+            color = BrandCoralPink,
+            onApply = {
+                activeScenarioId = "inv_property"
+                onLifestyleAdjustmentWeeklyChange(0f)
+                onRateShockProp1Change(0f)
+                onRateShockProp2Change(0f)
+                onRentalIncomeGrowthWeeklyChange(0f)
+                onSuperBoostWeeklyChange(0f)
+                milestoneList.clear()
+                milestoneList.add(
+                    LifeMilestoneBlock(
+                        id = "m_au_prop",
+                        title = "Buy Aussie Investment Property ($750k)",
+                        category = MilestoneCategory.PROPERTY,
+                        startYear = 2,
+                        durationYears = 25,
+                        weeklyCashflowImpact = -150.0,
+                        assetImpact = 750000.0,
+                        liabilityImpact = 600000.0,
+                        isEnabled = true
+                    )
+                )
+            }
+        ),
+        AussieScenarioTile(
+            id = "etf_dca",
+            title = "ASX ETF Plan",
+            badge = "+$150/wk VAS/VGS",
+            icon = Icons.AutoMirrored.Filled.ShowChart,
+            color = BrandMintGreen,
+            onApply = {
+                activeScenarioId = "etf_dca"
+                onLifestyleAdjustmentWeeklyChange(150f)
+                onRateShockProp1Change(0f)
+                onRateShockProp2Change(0f)
+                onRentalIncomeGrowthWeeklyChange(0f)
+                onSuperBoostWeeklyChange(50f)
+                milestoneList.clear()
+            }
+        ),
+        AussieScenarioTile(
+            id = "parental_leave",
+            title = "Parental Leave",
+            badge = "1 Yr Career Break",
+            icon = Icons.Default.ChildCare,
+            color = BrandCoralLight,
+            onApply = {
+                activeScenarioId = "parental_leave"
+                onLifestyleAdjustmentWeeklyChange(0f)
+                onRateShockProp1Change(0f)
+                onRateShockProp2Change(0f)
+                onRentalIncomeGrowthWeeklyChange(0f)
+                onSuperBoostWeeklyChange(0f)
+                milestoneList.clear()
+                milestoneList.add(
+                    LifeMilestoneBlock(
+                        id = "m_au_parental",
+                        title = "Parental Leave / 1 Yr Reduced Income",
+                        category = MilestoneCategory.CAREER,
+                        startYear = 2,
+                        durationYears = 1,
+                        weeklyCashflowImpact = -650.0,
+                        assetImpact = 0.0,
+                        liabilityImpact = 0.0,
+                        isEnabled = true
+                    )
+                )
+            }
+        )
+    )
+
+    val quickMilestoneTemplates = listOf(
+        AussieMilestoneTemplate("🏡 Investment Property", "Buy Investment Property ($750k)", MilestoneCategory.PROPERTY, 2, 25, -150.0, 750000.0, 600000.0),
+        AussieMilestoneTemplate("💼 Pay Rise (+$200/wk)", "Career Promotion / Pay Rise", MilestoneCategory.CAREER, 1, 15, 200.0, 0.0, 0.0),
+        AussieMilestoneTemplate("👶 Parental Leave (1 Yr)", "Parental Leave (12 Months)", MilestoneCategory.CAREER, 2, 1, -650.0, 0.0, 0.0),
+        AussieMilestoneTemplate("🚗 Upgrade Car / EV ($45k)", "Buy New EV / Family SUV", MilestoneCategory.PURCHASE, 2, 1, 0.0, -45000.0, 0.0),
+        AussieMilestoneTemplate("🔨 Home Renovation ($60k)", "Kitchen & Living Renovation", MilestoneCategory.PROPERTY, 3, 1, 0.0, 40000.0, 60000.0),
+        AussieMilestoneTemplate("🎓 Private School Fees", "Kids High School Fees (6 Yrs)", MilestoneCategory.PURCHASE, 4, 6, -350.0, 0.0, 0.0),
+        AussieMilestoneTemplate("✈️ Europe / Big Holiday", "Major Family Holiday ($18k)", MilestoneCategory.PURCHASE, 2, 1, 0.0, -18000.0, 0.0),
+        AussieMilestoneTemplate("💰 Bonus / Inheritance", "Lump Sum Windfall ($50k)", MilestoneCategory.INVESTMENT, 3, 1, 0.0, 50000.0, 0.0)
+    )
 
     LazyColumn(
         modifier = Modifier
@@ -5335,302 +6040,99 @@ fun WhatIfScenarioScreen(
         contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // SCENARIO PRESET TILES
+        // ====================================================================
+        // 1. SQUARE TILES SCENARIO EXPLORER (AUSTRALIAN EDITION)
+        // ====================================================================
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Preset Scenario Explorer", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item {
-                        Card(
-                            onClick = {
-                                lifestyleAdjustmentWeekly = 150f
-                                rateShockProp1 = 0f
-                                rateShockProp2 = 0f
-                                rentalIncomeGrowthWeekly = 0f
-                                milestoneList.clear()
-                            },
-                            modifier = Modifier.size(110.dp),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = BrandMintGreen)
-                        ) {
-                            Column(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                                Icon(Icons.Default.RocketLaunch, contentDescription = null, tint = BrandForestDark, modifier = Modifier.size(28.dp))
-                                Text("Aggressive Saver", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = BrandForestDark, lineHeight = 14.sp)
-                            }
-                        }
-                    }
-                    item {
-                        Card(
-                            onClick = {
-                                lifestyleAdjustmentWeekly = 0f
-                                rateShockProp1 = 0f
-                                rateShockProp2 = 0f
-                                rentalIncomeGrowthWeekly = 0f
-                                milestoneList.clear()
-                                milestoneList.add(
-                                    LifeMilestoneBlock("m_prop", "Investment Property", MilestoneCategory.PROPERTY, startYear = 2, durationYears = 15, weeklyCashflowImpact = -180.0, assetImpact = 650000.0, liabilityImpact = 520000.0, isEnabled = true)
-                                )
-                            },
-                            modifier = Modifier.size(110.dp),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = BrandCoralPink)
-                        ) {
-                            Column(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                                Icon(Icons.Default.HomeWork, contentDescription = null, tint = BrandForestDark, modifier = Modifier.size(28.dp))
-                                Text("Investment Property", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = BrandForestDark, lineHeight = 14.sp)
-                            }
-                        }
-                    }
-                    item {
-                        Card(
-                            onClick = {
-                                lifestyleAdjustmentWeekly = 0f
-                                rateShockProp1 = 2f
-                                rateShockProp2 = 2f
-                                rentalIncomeGrowthWeekly = 0f
-                                milestoneList.clear()
-                            },
-                            modifier = Modifier.size(110.dp),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = BrandWarmAmber)
-                        ) {
-                            Column(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                                Icon(Icons.AutoMirrored.Filled.TrendingUp, contentDescription = null, tint = BrandForestDark, modifier = Modifier.size(28.dp))
-                                Text("Rate Hike (+2%)", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = BrandForestDark, lineHeight = 14.sp)
-                            }
-                        }
-                    }
-                    item {
-                        Card(
-                            onClick = {
-                                lifestyleAdjustmentWeekly = 0f
-                                rateShockProp1 = 0f
-                                rateShockProp2 = 0f
-                                rentalIncomeGrowthWeekly = 0f
-                                milestoneList.clear()
-                            },
-                            modifier = Modifier.size(110.dp),
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                        ) {
-                            Column(modifier = Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.SpaceBetween) {
-                                Icon(Icons.Default.Refresh, contentDescription = null, tint = SlateGray, modifier = Modifier.size(28.dp))
-                                Text("Reset All", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface, lineHeight = 14.sp)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // WELCOME GUIDE OR HELP BUTTON
-        item {
-            if (showGuide) {
-                Card(
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(containerColor = BrandForestDark),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                    Column {
+                        Text("Scenario Explorer", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                        Text("Tap a square tile to test popular Australian scenarios", fontSize = 11.sp, color = SlateGray)
+                    }
+                    if (hasAnyChanges) {
+                        TextButton(
+                            onClick = { resetAllToStatusQuo() },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Icon(Icons.Default.Lightbulb, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(20.dp))
-                                Text("HOW THE WHAT-IF SIMULATOR WORKS", color = BrandCoralPink, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
-                            }
-                            TextButton(onClick = { showGuide = false }) {
-                                Text("Got it, hide", fontSize = 11.sp, color = BrandMintGreen)
-                            }
-                        }
-                        Text(
-                            text = "This simulator models your future Net Worth over time by comparing your current Status Quo (Path A) against your New Plan (Path B).\n\n" +
-                                    "• Use the Timeframe & Mortgage Interest Levers to test economic changes.\n" +
-                                    "• Add Life Milestones to model property purchases, career changes, or major expenses. Each milestone automatically deducts/adds to your weekly surplus and updates your compounding wealth timeline starting from your chosen future year.",
-                            color = Color.White,
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp
-                        )
-                    }
-                }
-            } else {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = { showGuide = true }) {
-                        Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Show Simulator Guide", fontSize = 12.sp)
-                    }
-                }
-            }
-        }
-
-        // AI COACH INSIGHT BANNER
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = if (deficitYear != null) BrandCoralPink.copy(alpha = 0.15f)
-                    else if (netWorthDifference >= 0) BrandMintGreen.copy(alpha = 0.15f)
-                    else BrandWarmAmber.copy(alpha = 0.15f)
-                ),
-                border = BorderStroke(
-                    1.5.dp,
-                    if (deficitYear != null) BrandCoralPink
-                    else if (netWorthDifference >= 0) BrandMintGreen
-                    else BrandWarmAmber
-                )
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Icon(
-                                if (deficitYear != null) Icons.Default.Warning
-                                else if (netWorthDifference >= 0) Icons.Default.CheckCircle
-                                else Icons.Default.Info,
-                                contentDescription = null,
-                                tint = if (deficitYear != null) BrandCoralPink
-                                else if (netWorthDifference >= 0) BrandMintGreen
-                                else BrandWarmAmber,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Text(
-                                "AI FINANCIAL COACH ADVICE",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (deficitYear != null) BrandCoralPink
-                                else if (netWorthDifference >= 0) BrandMintGreen
-                                else BrandWarmAmber,
-                                letterSpacing = 1.sp
-                            )
+                            Icon(Icons.Default.Refresh, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Reset", color = BrandCoralPink, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         }
                     }
-
-                    Text(
-                        text = when {
-                            deficitYear != null -> "🚨 Cash Flow Alert: In Year $deficitYear, active life events cause your cash reserves to enter a deficit. Consider spacing out major expenses."
-                            netWorthDifference > 100000 -> "💡 Great News! Your selected plan leaves you +${maskVal(netWorthDifference, 0)} richer by Year $horizonYears compared to your current status quo!"
-                            lifestyleAdjustmentWeekly > 50 -> "📈 Excellent savings habit! Stashing an extra $${lifestyleAdjustmentWeekly.toInt()}/wk significantly boosts your long-term compounding."
-                            else -> "✨ Tip: Toggle life milestone events below or adjust your weekly savings slider to test different financial futures!"
-                        },
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        lineHeight = 18.sp
-                    )
                 }
-            }
-        }
 
-        // CONVERSATIONAL WHAT-IF AI CHAT COMPANION CARD
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-            ) {
-                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(20.dp))
-                        Text("Conversational What-If AI Companion", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    }
-                    Text("Ask complex financial questions in plain English (e.g. 'What happens if I buy a $40k car next year while increasing my extra mortgage repayments by $100 a week?'):", fontSize = 12.sp, color = SlateGray)
-
-                    if (whatIfChatHistory.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            whatIfChatHistory.forEach { msg ->
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = if (msg.isFromUser) BrandCoralPink.copy(alpha = 0.2f) else BrandForestDark,
-                                    modifier = Modifier.fillMaxWidth()
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(scenarioTiles) { tile ->
+                        val isSelected = (tile.id == "status_quo" && !hasAnyChanges) || (tile.id == activeScenarioId && hasAnyChanges)
+                        Card(
+                            onClick = tile.onApply,
+                            modifier = Modifier.size(116.dp),
+                            shape = RoundedCornerShape(18.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) tile.color else MaterialTheme.colorScheme.surface
+                            ),
+                            border = BorderStroke(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) Color.White else tile.color.copy(alpha = 0.45f)
+                            ),
+                            elevation = CardDefaults.cardElevation(defaultElevation = if (isSelected) 6.dp else 2.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.Top
                                 ) {
-                                    Text(
-                                        text = (if (msg.isFromUser) "You: " else "AI: ") + msg.text,
-                                        fontSize = 12.sp,
-                                        color = if (msg.isFromUser) MaterialTheme.colorScheme.onSurface else Color.White,
-                                        modifier = Modifier.padding(10.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = whatIfChatInput,
-                            onValueChange = { whatIfChatInput = it },
-                            placeholder = { Text("Ask Gemini a What-If question...", fontSize = 12.sp) },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp),
-                            maxLines = 2
-                        )
-                        Button(
-                            onClick = {
-                                if (whatIfChatInput.isNotBlank() && !isWhatIfAiLoading) {
-                                    val q = whatIfChatInput.trim()
-                                    whatIfChatInput = ""
-                                    whatIfChatHistory.add(ChatMessage(q, true))
-                                    isWhatIfAiLoading = true
-                                    coroutineScope.launch {
-                                        val pathAEndNW = pathASeries.lastOrNull() ?: baseNetWorth
-                                        val pathBEndNW = pathBSeries.lastOrNull() ?: baseNetWorth
-                                        val nwImpact = pathBEndNW - pathAEndNW
-                                        val activeMilestonesStr = milestoneList.filter { it.isEnabled }.let { list ->
-                                            if (list.isEmpty()) "None"
-                                            else list.joinToString { "'${it.title}' (Start Yr ${it.startYear}, Duration ${it.durationYears}Y, Assets Impact: ${formatCurrency(it.assetImpact, 0)}, Liability Impact: ${formatCurrency(it.liabilityImpact, 0)}, Weekly Cashflow Impact: ${formatCurrency(it.weeklyCashflowImpact, 2)}/wk)" }
-                                        }
-
-                                        val whatIfContextSummary = buildString {
-                                            append("EXPLICIT COMPUTED WHAT-IF SIMULATION DATA (DO NOT RECALCULATE): ")
-                                            append("Time Horizon = $horizonYears Years. ")
-                                            append("Baseline Net Worth = ${formatCurrency(baseNetWorth, 2)}. ")
-                                            append("Baseline Weekly Surplus = ${formatCurrency(baseSurplusWeekly, 2)}/wk. ")
-                                            append("Baseline Projected Net Worth in ${horizonYears}Y (Path A) = ${formatCurrency(pathAEndNW, 2)}. ")
-                                            append("Simulated Projected Net Worth in ${horizonYears}Y (Path B) = ${formatCurrency(pathBEndNW, 2)}. ")
-                                            append("Net Wealth Impact (Path B vs Path A) = ${if (nwImpact >= 0) "+" else ""}${formatCurrency(nwImpact, 2)}. ")
-                                            if (lifestyleAdjustmentWeekly != 0f) {
-                                                append("Lifestyle Spending Adjustment = ${formatCurrency(lifestyleAdjustmentWeekly.toDouble(), 2)}/wk. ")
-                                            }
-                                            if (totalWeeklyRateShockCost > 0) {
-                                                append("Mortgage Interest Rate Shock Cost = -${formatCurrency(totalWeeklyRateShockCost, 2)}/wk. ")
-                                            }
-                                            if (rentalIncomeGrowthWeekly != 0f) {
-                                                append("Rental Income Growth Adjustment = +${formatCurrency(rentalIncomeGrowthWeekly.toDouble(), 2)}/wk. ")
-                                            }
-                                            if (deficitYear != null) {
-                                                append("CRITICAL WARNING: Cashflow Deficit projected in Year $deficitYear! ")
-                                            }
-                                            append("Active Life Milestones in Scenario: $activeMilestonesStr. ")
-                                            append("Total Assets = ${formatCurrency(totalAssets, 0)} (Properties: ${formatCurrency(totalPropertyVal, 0)}, Shares: ${formatCurrency(totalSharesVal, 0)}, Super: ${formatCurrency(totalSuperVal, 0)}, Offsets: ${formatCurrency(totalOffsets, 0)}). ")
-                                            append("Total Liabilities = ${formatCurrency(totalLiabilities, 0)}.")
-                                        }
-
-                                        val reply = AiAssistantManager.askGeminiAssistant(q, financialContextSummary.ifBlank { whatIfContextSummary })
-                                        whatIfChatHistory.add(ChatMessage(reply, false))
-                                        isWhatIfAiLoading = false
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = if (isSelected) BrandForestDark.copy(alpha = 0.18f) else tile.color.copy(alpha = 0.18f),
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            tile.icon,
+                                            contentDescription = null,
+                                            tint = if (isSelected) BrandForestDark else tile.color,
+                                            modifier = Modifier.padding(7.dp)
+                                        )
+                                    }
+                                    if (isSelected) {
+                                        Icon(
+                                            Icons.Default.CheckCircle,
+                                            contentDescription = "Active",
+                                            tint = BrandForestDark,
+                                            modifier = Modifier.size(16.dp)
+                                        )
                                     }
                                 }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.height(50.dp)
-                        ) {
-                            if (isWhatIfAiLoading) {
-                                CircularProgressIndicator(modifier = Modifier.size(18.dp), color = BrandForestDark, strokeWidth = 2.dp)
-                            } else {
-                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        tile.title,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = if (isSelected) BrandForestDark else MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        tile.badge,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) BrandForestDark.copy(alpha = 0.8f) else tile.color,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -5638,192 +6140,417 @@ fun WhatIfScenarioScreen(
             }
         }
 
-        // SIMULATOR CONTROLS (TIME HORIZON & SLIDERS)
+        // ====================================================================
+        // 2. HERO LIVE PROJECTION & TRAJECTORY COMPARISON CARD
+        // ====================================================================
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
             ) {
-                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    // Header + Timeframe Selector Pills
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("1. Projection Timeframe", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                            Text("How far into the future to simulate", fontSize = 11.sp, color = SlateGray)
+                        Column {
+                            Text("Projected Net Worth", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                            Text("In $horizonYears Years (Today: ${maskVal(baseNetWorth, 0)})", fontSize = 11.sp, color = SlateGray)
                         }
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf(5, 10, 15, 20, 30).forEach { yrs ->
-                            FilterChip(
-                                selected = horizonYears == yrs,
-                                onClick = { onHorizonYearsChange(yrs) },
-                                label = { Text("${yrs}Y", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
-                            )
-                        }
-                    }
-
-                    HorizontalDivider()
-
-                    // Weekly Savings / Spending Slider
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("2. Extra Weekly Savings / Spending", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                            Text(
-                                if (lifestyleAdjustmentWeekly == 0f) "$0 / wk"
-                                else if (lifestyleAdjustmentWeekly > 0) "+$${lifestyleAdjustmentWeekly.toInt()} / wk saved"
-                                else "-$${abs(lifestyleAdjustmentWeekly.toInt())} / wk spent",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = if (lifestyleAdjustmentWeekly > 0) BrandMintGreen else BrandCoralPink
-                            )
-                        }
-                        Text("Slide right to test saving extra money each week, or left to test spending more.", fontSize = 11.sp, color = SlateGray)
-                        Slider(
-                            value = lifestyleAdjustmentWeekly,
-                            onValueChange = { onLifestyleAdjustmentWeeklyChange(it) },
-                            valueRange = -200f..300f,
-                            steps = 10,
-                            colors = SliderDefaults.colors(
-                                thumbColor = BrandCoralPink,
-                                activeTrackColor = BrandCoralPink
-                            )
-                        )
-                    }
-
-                    HorizontalDivider()
-
-                    // Interest Rate Hike Sliders (Per Loan)
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("3. Mortgage Interest Rate Levers", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                        Text("Test how interest rate changes on your home loans impact your wealth over time.", fontSize = 11.sp, color = SlateGray)
-
-                        // Loan 1
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("Loan 1: ${prop1Loan.name}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                Text(
-                                    if (rateShockProp1 == 0f) "Base (${String.format(Locale.getDefault(), "%.2f", baseRate1)}%)"
-                                    else "+${String.format(Locale.getDefault(), "%.1f", rateShockProp1)}% (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}%)",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = if (rateShockProp1 > 0) BrandCoralPink else BrandMintGreen
-                                )
-                            }
-                            Slider(
-                                value = rateShockProp1,
-                                onValueChange = { onRateShockProp1Change(it) },
-                                valueRange = 0f..4f,
-                                steps = 8,
-                                colors = SliderDefaults.colors(thumbColor = BrandMintGreen, activeTrackColor = BrandMintGreen)
-                            )
-                        }
-
-                        // Loan 2 (if present)
-                        if (appConfig.hasSecondProperty) {
-                            Spacer(Modifier.height(4.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("Loan 2: ${prop2Loan.name}", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            listOf(5, 10, 15, 20, 30).forEach { yrs ->
+                                val selected = horizonYears == yrs
+                                Surface(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { onHorizonYearsChange(yrs) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (selected) BrandCoralPink else MaterialTheme.colorScheme.surfaceVariant
+                                ) {
                                     Text(
-                                        if (rateShockProp2 == 0f) "Base (${String.format(Locale.getDefault(), "%.2f", baseRate2)}%)"
-                                        else "+${String.format(Locale.getDefault(), "%.1f", rateShockProp2)}% (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}%)",
-                                        fontSize = 12.sp,
+                                        text = "${yrs}Y",
+                                        fontSize = 11.sp,
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = if (rateShockProp2 > 0) BrandCoralPink else BrandMintGreen
+                                        color = if (selected) BrandForestDark else MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                                     )
                                 }
-                                Slider(
-                                    value = rateShockProp2,
-                                    onValueChange = { onRateShockProp2Change(it) },
-                                    valueRange = 0f..4f,
-                                    steps = 8,
-                                    colors = SliderDefaults.colors(thumbColor = BrandMintGreen, activeTrackColor = BrandMintGreen)
-                                )
                             }
                         }
                     }
-                }
-            }
-        }
 
-        // SIDE-BY-SIDE NET WORTH COMPARISON CARD
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-            ) {
-                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text("Your Projected Net Worth in $horizonYears Years", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        // Path A
+                    // Side-by-Side Current Path vs What-If Plan
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Card(
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(14.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                         ) {
-                            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("CURRENT PATH", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = SlateGray)
-                                Text(maskVal(endPathANetWorth, 0), fontSize = 17.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
-                                Text("Status Quo Trajectory", fontSize = 11.sp, color = SlateGray)
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("STATUS QUO", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = SlateGray)
+                                Text(
+                                    maskVal(endPathANetWorth, 0),
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    "Surplus: ${maskVal(baseSurplusWeekly, 0)}/wk",
+                                    fontSize = 11.sp,
+                                    color = SlateGray
+                                )
                             }
                         }
 
-                        // Path B
+                        val isPositiveDiff = netWorthDifference >= 0
+                        val planAccent = if (!hasAnyChanges) BrandSkyBlue else if (isPositiveDiff) BrandMintGreen else BrandCoralPink
                         Card(
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(14.dp),
-                            colors = CardDefaults.cardColors(containerColor = BrandCoralPink.copy(alpha = 0.15f)),
-                            border = BorderStroke(1.dp, BrandCoralPink)
+                            colors = CardDefaults.cardColors(containerColor = planAccent.copy(alpha = 0.14f)),
+                            border = BorderStroke(1.5.dp, planAccent)
                         ) {
-                            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text("YOUR NEW PLAN", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = BrandCoralPink)
-                                Text(maskVal(endPathBNetWorth, 0), fontSize = 17.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
-                                Text("With Sliders & Milestones", fontSize = 11.sp, color = BrandCoralPink)
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("WHAT-IF PLAN", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = planAccent)
+                                Text(
+                                    maskVal(endPathBNetWorth, 0),
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = planAccent
+                                )
+                                Text(
+                                    "Surplus: ${maskVal(simulatedWeeklySurplusNow, 0)}/wk",
+                                    fontSize = 11.sp,
+                                    color = planAccent
+                                )
                             }
                         }
                     }
 
-                    // Difference pill
+                    // Visual Dual-Line Wealth Trajectory Chart
+                    WhatIfTrajectoryChart(
+                        pathASeries = pathASeries,
+                        pathBSeries = pathBSeries,
+                        horizonYears = horizonYears,
+                        isPositiveDiff = netWorthDifference >= 0
+                    )
+
+                    // Net Difference Pill + Weekly Cashflow Pill
+                    val diffColor = if (abs(netWorthDifference) < 1.0) SlateGray else if (netWorthDifference > 0) BrandMintGreen else BrandCoralPink
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
-                        color = if (netWorthDifference >= 0) BrandMintGreen.copy(alpha = 0.15f) else BrandCoralPink.copy(alpha = 0.15f)
+                        color = diffColor.copy(alpha = 0.14f)
                     ) {
                         Row(
-                            modifier = Modifier.padding(14.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Net Advantage in $horizonYears Years:", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Column {
+                                Text(
+                                    if (abs(netWorthDifference) < 1.0) "No changes active yet"
+                                    else if (netWorthDifference > 0) "Net Wealth Gain in $horizonYears Yrs"
+                                    else "Net Wealth Cost in $horizonYears Yrs",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    if (abs(weeklyCashflowDeltaNow) < 0.5) "Weekly cashflow unchanged"
+                                    else "Weekly cashflow: ${if (weeklyCashflowDeltaNow > 0) "+" else ""}${maskVal(weeklyCashflowDeltaNow, 0)}/wk",
+                                    fontSize = 11.sp,
+                                    color = SlateGray
+                                )
+                            }
                             Text(
-                                "${if (netWorthDifference >= 0) "+" else ""}${maskVal(netWorthDifference, 0)}",
+                                text = if (abs(netWorthDifference) < 1.0) "$0"
+                                else "${if (netWorthDifference > 0) "+" else ""}${maskVal(netWorthDifference, 0)}",
                                 fontWeight = FontWeight.ExtraBold,
-                                fontSize = 16.sp,
-                                color = if (netWorthDifference >= 0) BrandMintGreen else BrandCoralPink
+                                fontSize = 17.sp,
+                                color = diffColor
                             )
+                        }
+                    }
+
+                    if (deficitYear != null) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            color = BrandCoralRed.copy(alpha = 0.15f),
+                            border = BorderStroke(1.dp, BrandCoralRed)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Default.Warning, contentDescription = null, tint = BrandCoralRed, modifier = Modifier.size(18.dp))
+                                Text(
+                                    "Cash Reserve Alert: Liquid offset/cash reserves drop below $0 in Year $deficitYear under this scenario.",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = BrandCoralRed
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // LIFE MILESTONES STACKER CARD
+        // ====================================================================
+        // 3. INTERACTIVE AUSTRALIAN FINANCIAL LEVERS (SLIDERS + TYPED INPUT + PRESETS + CUSTOM LEVERS)
+        // ====================================================================
+        item {
+            val baseRate1 = prop1Loan.interestRatePa
+            val shockedRate1 = (baseRate1 + rateShockProp1).coerceAtLeast(0.5)
+            val baseRate2 = prop2Loan.interestRatePa
+            val shockedRate2 = (baseRate2 + rateShockProp2).coerceAtLeast(0.5)
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+            ) {
+                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Interactive Levers", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                            Text("Slide, tap presets, or tap any value/keyboard icon to type an exact number", fontSize = 11.sp, color = SlateGray)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                customLeverToEdit = null
+                                showAddCustomLeverDialog = true
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Custom Lever", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                        }
+                    }
+
+                    // LEVER 1: EXTRA WEEKLY OFFSET / SAVINGS
+                    WhatIfInteractiveLeverCard(
+                        title = "1. Extra Weekly Offset / Savings",
+                        subtitle = if (lifestyleAdjustmentWeekly == 0f) "Slide right to save more, left to spend more, or type any $/wk"
+                        else "${if (lifestyleAdjustmentWeekly > 0) "+" else ""}${maskVal(lifestyleAdjustmentWeekly * 52.0, 0)} per year",
+                        value = lifestyleAdjustmentWeekly,
+                        valueRange = -500f..1000f,
+                        stepSize = 25f,
+                        isPercentage = false,
+                        unitSuffix = "/wk",
+                        accentColor = if (lifestyleAdjustmentWeekly >= 0f) BrandMintGreen else BrandCoralPink,
+                        presets = listOf(-100f to "-$100", 0f to "$0", 100f to "+$100", 200f to "+$200", 350f to "+$350"),
+                        onValueChange = { newVal ->
+                            activeScenarioId = "custom"
+                            onLifestyleAdjustmentWeeklyChange(newVal)
+                        }
+                    )
+
+                    HorizontalDivider()
+
+                    // LEVER 2: PROPERTY 1 INTEREST RATE CHANGE
+                    WhatIfInteractiveLeverCard(
+                        title = "2. ${appConfig.property1Name} Interest Rate Δ",
+                        subtitle = when {
+                            abs(weeklyMortgageDelta1) < 0.5 -> "${prop1Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate1)}% p.a."
+                            weeklyMortgageDelta1 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta1), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
+                            else -> "Costs -${maskVal(weeklyMortgageDelta1, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
+                        },
+                        value = rateShockProp1,
+                        valueRange = -3.0f..4.0f,
+                        stepSize = 0.25f,
+                        isPercentage = true,
+                        unitSuffix = "%",
+                        accentColor = if (rateShockProp1 <= 0f) BrandMintGreen else BrandCoralPink,
+                        presets = listOf(-1.0f to "-1.0%", -0.5f to "-0.5%", 0f to "0.0%", 0.5f to "+0.5%", 1.0f to "+1.0%"),
+                        onValueChange = { newVal ->
+                            activeScenarioId = "custom"
+                            onRateShockProp1Change(newVal)
+                        }
+                    )
+
+                    HorizontalDivider()
+
+                    // LEVER 3: PROPERTY 2 INTEREST RATE CHANGE (DEDICATED LEVER PER PROPERTY)
+                    WhatIfInteractiveLeverCard(
+                        title = "3. ${if (appConfig.hasSecondProperty) appConfig.property2Name else "Property 2"} Interest Rate Δ",
+                        subtitle = if (!appConfig.hasSecondProperty) {
+                            "Enable 2nd property in Settings or test hypothetical 2nd property rate changes"
+                        } else {
+                            when {
+                                abs(weeklyMortgageDelta2) < 0.5 -> "${prop2Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate2)}% p.a."
+                                weeklyMortgageDelta2 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta2), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
+                                else -> "Costs -${maskVal(weeklyMortgageDelta2, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
+                            }
+                        },
+                        value = rateShockProp2,
+                        valueRange = -3.0f..4.0f,
+                        stepSize = 0.25f,
+                        isPercentage = true,
+                        unitSuffix = "%",
+                        accentColor = if (rateShockProp2 <= 0f) BrandMintGreen else BrandWarmAmber,
+                        presets = listOf(-1.0f to "-1.0%", -0.5f to "-0.5%", 0f to "0.0%", 0.5f to "+0.5%", 1.0f to "+1.0%"),
+                        onValueChange = { newVal ->
+                            activeScenarioId = "custom"
+                            onRateShockProp2Change(newVal)
+                        }
+                    )
+
+                    HorizontalDivider()
+
+                    // LEVER 4: SUPERANNUATION SALARY SACRIFICE BOOST
+                    WhatIfInteractiveLeverCard(
+                        title = "4. Extra Super Salary Sacrifice",
+                        subtitle = if (superBoostWeekly == 0f) "Concessional Super contributions compounding at 8% p.a."
+                        else "+${maskVal(superBoostWeekly * 52.0, 0)}/yr boosted into Super",
+                        value = superBoostWeekly,
+                        valueRange = 0f..600f,
+                        stepSize = 25f,
+                        isPercentage = false,
+                        unitSuffix = "/wk",
+                        accentColor = BrandSkyBlue,
+                        presets = listOf(0f to "$0", 50f to "+$50", 100f to "+$100", 150f to "+$150", 250f to "+$250"),
+                        onValueChange = { newVal ->
+                            activeScenarioId = "custom"
+                            onSuperBoostWeeklyChange(newVal.coerceAtLeast(0f))
+                        }
+                    )
+
+                    HorizontalDivider()
+
+                    // LEVER 5: RENTAL INCOME / PROPERTY CASHFLOW CHANGE
+                    WhatIfInteractiveLeverCard(
+                        title = "5. Weekly Rent / Property Cashflow",
+                        subtitle = "Model higher rental income (+$/wk) or higher property holding costs (-$/wk)",
+                        value = rentalIncomeGrowthWeekly,
+                        valueRange = -300f..500f,
+                        stepSize = 25f,
+                        isPercentage = false,
+                        unitSuffix = "/wk",
+                        accentColor = if (rentalIncomeGrowthWeekly >= 0f) BrandWarmAmber else BrandCoralPink,
+                        presets = listOf(-100f to "-$100", -50f to "-$50", 0f to "$0", 50f to "+$50", 150f to "+$150"),
+                        onValueChange = { newVal ->
+                            activeScenarioId = "custom"
+                            onRentalIncomeGrowthWeeklyChange(newVal)
+                        }
+                    )
+
+                    // USER-DEFINED CUSTOM LEVERS
+                    if (customLevers.isNotEmpty()) {
+                        HorizontalDivider()
+                        Text(
+                            "Custom Levers (${customLevers.size})",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 14.sp,
+                            color = BrandCoralPink
+                        )
+                        customLevers.forEachIndexed { idx, cLever ->
+                            val isRateType = cLever.impactType == CustomLeverImpactType.INTEREST_RATE_DELTA
+                            val span = (cLever.maxValue - cLever.minValue).coerceAtLeast(1f)
+                            val q1 = cLever.minValue + span * 0.25f
+                            val q3 = cLever.minValue + span * 0.75f
+                            fun fmtPreset(v: Float): String = if (isRateType) {
+                                "${if (v > 0f) "+" else ""}${String.format(Locale.getDefault(), "%.2f", v)}%"
+                            } else {
+                                "${if (v > 0f) "+" else if (v < 0f) "-" else ""}$${abs(v.roundToInt())}"
+                            }
+                            val customPresets = listOf(
+                                cLever.minValue to fmtPreset(cLever.minValue),
+                                q1 to fmtPreset(q1),
+                                0f.coerceIn(cLever.minValue, cLever.maxValue) to fmtPreset(0f.coerceIn(cLever.minValue, cLever.maxValue)),
+                                q3 to fmtPreset(q3),
+                                cLever.maxValue to fmtPreset(cLever.maxValue)
+                            ).distinctBy { (it.first * 100).roundToInt() }
+
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = cLever.impactType.label,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = BrandCoralPink
+                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            IconButton(
+                                                onClick = {
+                                                    customLeverToEdit = cLever
+                                                    showAddCustomLeverDialog = true
+                                                },
+                                                modifier = Modifier.size(26.dp)
+                                            ) {
+                                                Icon(Icons.Default.Edit, contentDescription = "Edit Custom Lever", tint = SlateGray, modifier = Modifier.size(14.dp))
+                                            }
+                                            IconButton(
+                                                onClick = { customLevers.removeAt(idx) },
+                                                modifier = Modifier.size(26.dp)
+                                            ) {
+                                                Icon(Icons.Default.Delete, contentDescription = "Delete Custom Lever", tint = BrandCoralPink, modifier = Modifier.size(14.dp))
+                                            }
+                                            Switch(
+                                                checked = cLever.isEnabled,
+                                                onCheckedChange = { enabled ->
+                                                    customLevers[idx] = cLever.copy(isEnabled = enabled)
+                                                }
+                                            )
+                                        }
+                                    }
+
+                                    WhatIfInteractiveLeverCard(
+                                        title = cLever.title,
+                                        subtitle = "Range: ${fmtPreset(cLever.minValue)} to ${fmtPreset(cLever.maxValue)} (${cLever.impactType.unitSuffix})",
+                                        value = cLever.currentValue,
+                                        valueRange = cLever.minValue..cLever.maxValue,
+                                        stepSize = cLever.stepSize,
+                                        isPercentage = isRateType,
+                                        unitSuffix = cLever.impactType.unitSuffix,
+                                        accentColor = if (cLever.isEnabled) BrandMintGreen else SlateGray,
+                                        presets = customPresets,
+                                        onValueChange = { newVal ->
+                                            activeScenarioId = "custom"
+                                            customLevers[idx] = cLever.copy(currentValue = newVal, isEnabled = true)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ====================================================================
+        // 4. CUSTOM LIFE MILESTONES (EMPTY BY DEFAULT — ADD ANYTHING YOU LIKE)
+        // ====================================================================
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
+                shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
             ) {
@@ -5834,18 +6561,37 @@ fun WhatIfScenarioScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Life Milestone Events", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                            Text("Toggle, edit or add events in your plan", fontSize = 12.sp, color = SlateGray)
+                            Text("Life Milestones & Events", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                            Text("Starts empty — add any future purchase, property or career move", fontSize = 11.sp, color = SlateGray)
                         }
                         Button(
-                            onClick = { showAddMilestoneDialog = true },
+                            onClick = {
+                                prefillTemplate = null
+                                showAddMilestoneDialog = true
+                            },
                             colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark),
                             shape = RoundedCornerShape(12.dp),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Add Milestone", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("Custom Event", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+                    }
+
+                    // 1-Tap Quick-Add Australian Templates Row
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Quick-Add Australian Events (tap to customize & add):", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SlateGray)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(quickMilestoneTemplates) { tmpl ->
+                                AssistChip(
+                                    onClick = {
+                                        prefillTemplate = tmpl
+                                        showAddMilestoneDialog = true
+                                    },
+                                    label = { Text(tmpl.label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                )
+                            }
                         }
                     }
 
@@ -5853,16 +6599,21 @@ fun WhatIfScenarioScreen(
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
                         ) {
                             Column(
-                                modifier = Modifier.padding(20.dp),
+                                modifier = Modifier.padding(18.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Icon(Icons.AutoMirrored.Filled.EventNote, contentDescription = null, tint = SlateGray, modifier = Modifier.size(32.dp))
-                                Text("No milestones added yet", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Text("Tap 'Add Milestone' above to model custom life events, property purchases, or career shifts.", fontSize = 12.sp, color = SlateGray, textAlign = TextAlign.Center)
+                                Icon(Icons.AutoMirrored.Filled.EventNote, contentDescription = null, tint = SlateGray, modifier = Modifier.size(28.dp))
+                                Text("No milestone events active", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface)
+                                Text(
+                                    "Your simulation is completely clean. Tap 'Custom Event' or any Quick-Add chip above to layer life events onto your timeline.",
+                                    fontSize = 11.sp,
+                                    color = SlateGray,
+                                    textAlign = TextAlign.Center
+                                )
                             }
                         }
                     } else {
@@ -5877,7 +6628,7 @@ fun WhatIfScenarioScreen(
                                 shape = RoundedCornerShape(14.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(14.dp),
+                                    modifier = Modifier.padding(12.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -5893,13 +6644,21 @@ fun WhatIfScenarioScreen(
                                         ) {
                                             Icon(milestone.category.icon, contentDescription = null, tint = BrandForestDark, modifier = Modifier.padding(8.dp))
                                         }
-                                        Column {
-                                            Text(milestone.title, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                            Text(
-                                                "Starts Year ${milestone.startYear} • ${if (milestone.weeklyCashflowImpact != 0.0) "${if (milestone.weeklyCashflowImpact > 0) "+" else ""}$${milestone.weeklyCashflowImpact.toInt()}/wk" else "Capital Outlay"}",
-                                                fontSize = 11.sp,
-                                                color = SlateGray
-                                            )
+                                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                            Text(milestone.title, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                            val details = buildList {
+                                                add("Yr ${milestone.startYear}")
+                                                if (milestone.weeklyCashflowImpact != 0.0) {
+                                                    add("${if (milestone.weeklyCashflowImpact > 0) "+" else ""}$${milestone.weeklyCashflowImpact.toInt()}/wk (${milestone.durationYears}y)")
+                                                }
+                                                if (milestone.assetImpact != 0.0) {
+                                                    add("Assets: ${if (milestone.assetImpact > 0) "+" else ""}${formatCurrency(milestone.assetImpact, 0)}")
+                                                }
+                                                if (milestone.liabilityImpact > 0.0) {
+                                                    add("Loan: +${formatCurrency(milestone.liabilityImpact, 0)}")
+                                                }
+                                            }.joinToString(" • ")
+                                            Text(details, fontSize = 11.sp, color = SlateGray)
                                         }
                                     }
                                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -5928,19 +6687,187 @@ fun WhatIfScenarioScreen(
                 }
             }
         }
+
+        // ====================================================================
+        // 5. CONVERSATIONAL WHAT-IF AI ADVISOR (WITH ONE-TAP AUSSIE PROMPTS)
+        // ====================================================================
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+            ) {
+                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(20.dp))
+                        Column {
+                            Text("Ask EXPNZ AI About This Scenario", fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                            Text("Get tailored Australian guidance on your numbers", fontSize = 11.sp, color = SlateGray)
+                        }
+                    }
+
+                    val samplePrompts = listOf(
+                        "Offset vs Super salary sacrifice for us?",
+                        "Can we afford a $750k investment property?",
+                        "Impact of two 0.25% RBA rate cuts?"
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(samplePrompts) { prompt ->
+                            SuggestionChip(
+                                onClick = { whatIfChatInput = prompt },
+                                label = { Text(prompt, fontSize = 11.sp) }
+                            )
+                        }
+                    }
+
+                    if (whatIfChatHistory.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            whatIfChatHistory.forEach { msg ->
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (msg.isFromUser) BrandCoralPink.copy(alpha = 0.2f) else BrandForestDark,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = (if (msg.isFromUser) "You: " else "AI: ") + msg.text,
+                                        fontSize = 12.sp,
+                                        color = if (msg.isFromUser) MaterialTheme.colorScheme.onSurface else Color.White,
+                                        modifier = Modifier.padding(10.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = whatIfChatInput,
+                            onValueChange = { whatIfChatInput = it },
+                            placeholder = { Text("Ask any Australian What-If question...", fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            maxLines = 2
+                        )
+                        Button(
+                            onClick = {
+                                if (whatIfChatInput.isNotBlank() && !isWhatIfAiLoading) {
+                                    val q = whatIfChatInput.trim()
+                                    whatIfChatInput = ""
+                                    whatIfChatHistory.add(ChatMessage(q, true))
+                                    isWhatIfAiLoading = true
+                                    coroutineScope.launch {
+                                        val pathAEndNW = pathASeries.lastOrNull() ?: baseNetWorth
+                                        val pathBEndNW = pathBSeries.lastOrNull() ?: baseNetWorth
+                                        val nwImpact = pathBEndNW - pathAEndNW
+                                        val activeMilestonesStr = milestoneList.filter { it.isEnabled }.let { list ->
+                                            if (list.isEmpty()) "None"
+                                            else list.joinToString {
+                                                "'${it.title}' (Start Yr ${it.startYear}, Duration ${it.durationYears}Y, Assets: ${formatCurrency(it.assetImpact, 0)}, Loan: ${formatCurrency(it.liabilityImpact, 0)}, Weekly Cashflow: ${formatCurrency(it.weeklyCashflowImpact, 2)}/wk)"
+                                            }
+                                        }
+
+                                        val whatIfContextSummary = buildString {
+                                            append("EXPLICIT COMPUTED WHAT-IF SIMULATION DATA (AUSTRALIA): ")
+                                            append("Time Horizon = $horizonYears Years. ")
+                                            append("Baseline Net Worth = ${formatCurrency(baseNetWorth, 2)}. ")
+                                            append("Baseline Weekly Surplus = ${formatCurrency(baseSurplusWeekly, 2)}/wk. ")
+                                            append("Status Quo Net Worth in ${horizonYears}Y = ${formatCurrency(pathAEndNW, 2)}. ")
+                                            append("What-If Plan Net Worth in ${horizonYears}Y = ${formatCurrency(pathBEndNW, 2)}. ")
+                                            append("Net Wealth Impact = ${if (nwImpact >= 0) "+" else ""}${formatCurrency(nwImpact, 2)}. ")
+                                            append("Extra Weekly Offset/Savings = ${formatCurrency(lifestyleAdjustmentWeekly.toDouble(), 2)}/wk. ")
+                                            append("Property 1 Rate Change = ${rateShockProp1}% (Prop 2 Rate Change = ${rateShockProp2}%, Total weekly repayment delta: ${formatCurrency(totalWeeklyRateShockCost, 2)}/wk). ")
+                                            append("Extra Super Salary Sacrifice = ${formatCurrency(superBoostWeekly.toDouble(), 2)}/wk. ")
+                                            append("Active Milestones: $activeMilestonesStr. ")
+                                        }
+
+                                        val rawReply = AiAssistantManager.askGeminiAssistant(
+                                            q,
+                                            if (financialContextSummary.isNotBlank()) "$financialContextSummary\n$whatIfContextSummary" else whatIfContextSummary
+                                        )
+                                        val (cleanReply, appliedList) = onExecuteAiActions(rawReply)
+                                        whatIfChatHistory.add(ChatMessage(text = cleanReply, isFromUser = false, appliedActions = appliedList))
+                                        isWhatIfAiLoading = false
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.height(50.dp)
+                        ) {
+                            if (isWhatIfAiLoading) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), color = BrandForestDark, strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showAddCustomLeverDialog) {
+        AddEditCustomLeverDialog(
+            existingLever = customLeverToEdit,
+            onDismiss = {
+                showAddCustomLeverDialog = false
+                customLeverToEdit = null
+            },
+            onConfirm = { title, impactType, minVal, maxVal, stepVal, currVal ->
+                activeScenarioId = "custom"
+                if (customLeverToEdit != null) {
+                    val idx = customLevers.indexOfFirst { it.id == customLeverToEdit!!.id }
+                    if (idx >= 0) {
+                        customLevers[idx] = customLeverToEdit!!.copy(
+                            title = title,
+                            impactType = impactType,
+                            minValue = minVal,
+                            maxValue = maxVal,
+                            stepSize = stepVal,
+                            currentValue = currVal.coerceIn(minVal, maxVal)
+                        )
+                    }
+                } else {
+                    customLevers.add(
+                        CustomWhatIfLever(
+                            id = "clever_${System.currentTimeMillis()}",
+                            title = title,
+                            impactType = impactType,
+                            minValue = minVal,
+                            maxValue = maxVal,
+                            stepSize = stepVal,
+                            currentValue = currVal.coerceIn(minVal, maxVal),
+                            isEnabled = true
+                        )
+                    )
+                }
+                showAddCustomLeverDialog = false
+                customLeverToEdit = null
+            }
+        )
     }
 
     if (showAddMilestoneDialog) {
         AddCustomMilestoneDialog(
-            onDismiss = { showAddMilestoneDialog = false },
-            onConfirm = { title, cat, startY, weeklyCash, assetAmt, liabAmt ->
+            initialTemplate = prefillTemplate,
+            onDismiss = {
+                showAddMilestoneDialog = false
+                prefillTemplate = null
+            },
+            onConfirm = { title, cat, startY, durationY, weeklyCash, assetAmt, liabAmt ->
+                activeScenarioId = "custom"
                 milestoneList.add(
                     LifeMilestoneBlock(
                         id = "m_${System.currentTimeMillis()}",
                         title = title,
                         category = cat,
                         startYear = startY,
-                        durationYears = 10,
+                        durationYears = durationY,
                         weeklyCashflowImpact = weeklyCash,
                         assetImpact = assetAmt,
                         liabilityImpact = liabAmt,
@@ -5948,6 +6875,7 @@ fun WhatIfScenarioScreen(
                     )
                 )
                 showAddMilestoneDialog = false
+                prefillTemplate = null
             }
         )
     }
@@ -5956,13 +6884,15 @@ fun WhatIfScenarioScreen(
         EditCustomMilestoneDialog(
             milestone = milestoneToEdit!!,
             onDismiss = { milestoneToEdit = null },
-            onConfirm = { title, cat, startY, weeklyCash, assetAmt, liabAmt ->
+            onConfirm = { title, cat, startY, durationY, weeklyCash, assetAmt, liabAmt ->
+                activeScenarioId = "custom"
                 val idx = milestoneList.indexOfFirst { it.id == milestoneToEdit!!.id }
                 if (idx >= 0) {
                     milestoneList[idx] = milestoneToEdit!!.copy(
                         title = title,
                         category = cat,
                         startYear = startY,
+                        durationYears = durationY,
                         weeklyCashflowImpact = weeklyCash,
                         assetImpact = assetAmt,
                         liabilityImpact = liabAmt
@@ -5975,31 +6905,464 @@ fun WhatIfScenarioScreen(
 }
 
 @Composable
-fun AddCustomMilestoneDialog(
-    onDismiss: () -> Unit,
-    onConfirm: (String, MilestoneCategory, Int, Double, Double, Double) -> Unit
+private fun WhatIfInteractiveLeverCard(
+    title: String,
+    subtitle: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    stepSize: Float,
+    isPercentage: Boolean,
+    unitSuffix: String,
+    accentColor: Color,
+    presets: List<Pair<Float, String>>,
+    onValueChange: (Float) -> Unit
 ) {
-    var title by remember { mutableStateOf("") }
-    var selectedCategory by remember { mutableStateOf(MilestoneCategory.PROPERTY) }
-    var startYearStr by remember { mutableStateOf("3") }
-    var weeklyCashflowStr by remember { mutableStateOf("-150") }
-    var assetImpactStr by remember { mutableStateOf("0") }
-    var liabilityImpactStr by remember { mutableStateOf("0") }
+    var showNumberEntry by remember { mutableStateOf(false) }
+    var typedValueText by remember(value, showNumberEntry) {
+        mutableStateOf(
+            if (isPercentage) String.format(Locale.getDefault(), "%.2f", value)
+            else value.roundToInt().toString()
+        )
+    }
+
+    fun applyTypedNumber() {
+        val parsed = typedValueText.replace("$", "").replace("%", "").replace("+", "").trim().toFloatOrNull()
+        if (parsed != null) {
+            onValueChange(parsed.coerceIn(valueRange.start, valueRange.endInclusive))
+        }
+        showNumberEntry = false
+    }
+
+    val formattedBadge = if (isPercentage) {
+        when {
+            abs(value) < 0.005f -> "0.00%"
+            value > 0f -> "+${String.format(Locale.getDefault(), "%.2f", value)}%"
+            else -> "${String.format(Locale.getDefault(), "%.2f", value)}%"
+        }
+    } else {
+        val rounded = value.roundToInt()
+        when {
+            rounded == 0 -> "$0 $unitSuffix"
+            rounded > 0 -> "+$$rounded $unitSuffix"
+            else -> "-$${abs(rounded)} $unitSuffix"
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Text(
+                    subtitle,
+                    fontSize = 11.sp,
+                    color = SlateGray
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Surface(
+                onClick = { showNumberEntry = !showNumberEntry },
+                shape = RoundedCornerShape(10.dp),
+                color = accentColor.copy(alpha = 0.16f),
+                border = BorderStroke(1.dp, accentColor.copy(alpha = 0.6f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = formattedBadge,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = accentColor
+                    )
+                    Icon(
+                        Icons.Default.Edit,
+                        contentDescription = "Type exact number",
+                        tint = accentColor,
+                        modifier = Modifier.size(13.dp)
+                    )
+                }
+            }
+        }
+
+        if (showNumberEntry) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = typedValueText,
+                    onValueChange = { typedValueText = it },
+                    label = {
+                        Text(
+                            if (isPercentage) "Type exact % (${valueRange.start}% to +${valueRange.endInclusive}%)"
+                            else "Type exact amount ($${valueRange.start.roundToInt()} to $${valueRange.endInclusive.roundToInt()})"
+                        )
+                    },
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = if (isPercentage) KeyboardType.Decimal else KeyboardType.Number
+                    ),
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(10.dp)
+                )
+                Button(
+                    onClick = { applyTypedNumber() },
+                    colors = ButtonDefaults.buttonColors(containerColor = accentColor, contentColor = BrandForestDark),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Apply", fontWeight = FontWeight.ExtraBold, fontSize = 12.sp)
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            FilledIconButton(
+                onClick = {
+                    val next = if (isPercentage) {
+                        ((value - stepSize) * (1f / stepSize)).roundToInt() * stepSize
+                    } else {
+                        ((value - stepSize) / stepSize).roundToInt() * stepSize
+                    }
+                    onValueChange(next.coerceIn(valueRange.start, valueRange.endInclusive))
+                },
+                modifier = Modifier.size(34.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Icon(Icons.Default.Remove, contentDescription = "Decrease", modifier = Modifier.size(16.dp))
+            }
+
+            Slider(
+                value = value.coerceIn(valueRange.start, valueRange.endInclusive),
+                onValueChange = { raw ->
+                    val stepped = if (stepSize > 0f) {
+                        (raw / stepSize).roundToInt() * stepSize
+                    } else raw
+                    onValueChange(stepped.coerceIn(valueRange.start, valueRange.endInclusive))
+                },
+                valueRange = valueRange,
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(
+                    thumbColor = accentColor,
+                    activeTrackColor = accentColor
+                )
+            )
+
+            FilledIconButton(
+                onClick = {
+                    val next = if (isPercentage) {
+                        ((value + stepSize) * (1f / stepSize)).roundToInt() * stepSize
+                    } else {
+                        ((value + stepSize) / stepSize).roundToInt() * stepSize
+                    }
+                    onValueChange(next.coerceIn(valueRange.start, valueRange.endInclusive))
+                },
+                modifier = Modifier.size(34.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = accentColor.copy(alpha = 0.25f))
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Increase", tint = accentColor, modifier = Modifier.size(16.dp))
+            }
+        }
+
+        if (presets.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                presets.forEach { (presetVal, lbl) ->
+                    val isSelected = abs(value - presetVal) < (if (isPercentage) 0.04f else 0.5f)
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onValueChange(presetVal) },
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isSelected) accentColor.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        border = if (isSelected) BorderStroke(1.dp, accentColor) else null
+                    ) {
+                        Text(
+                            text = lbl,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            color = if (isSelected) accentColor else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(vertical = 5.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddEditCustomLeverDialog(
+    existingLever: CustomWhatIfLever? = null,
+    onDismiss: () -> Unit,
+    onConfirm: (String, CustomLeverImpactType, Float, Float, Float, Float) -> Unit
+) {
+    var title by remember { mutableStateOf(existingLever?.title ?: "") }
+    var selectedType by remember { mutableStateOf(existingLever?.impactType ?: CustomLeverImpactType.WEEKLY_CASHFLOW) }
+    var minValStr by remember { mutableStateOf((existingLever?.minValue ?: -200f).toString()) }
+    var maxValStr by remember { mutableStateOf((existingLever?.maxValue ?: 500f).toString()) }
+    var stepValStr by remember { mutableStateOf((existingLever?.stepSize ?: 25f).toString()) }
+    var currValStr by remember { mutableStateOf((existingLever?.currentValue ?: 0f).toString()) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add Custom Life Milestone", fontWeight = FontWeight.Bold) },
+        title = { Text(if (existingLever == null) "Add Custom Simulator Lever" else "Edit Custom Lever", fontWeight = FontWeight.ExtraBold) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Milestone Name (e.g. Sabbatical, Buy Boat)") },
+                    label = { Text("Lever Name (e.g. Side Hustle, Childcare, Solar Savings)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                Text("Category:", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("How does this lever impact your plan?", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    CustomLeverImpactType.entries.forEach { type ->
+                        FilterChip(
+                            selected = selectedType == type,
+                            onClick = {
+                                selectedType = type
+                                if (existingLever == null) {
+                                    when (type) {
+                                        CustomLeverImpactType.WEEKLY_CASHFLOW -> {
+                                            minValStr = "-300"
+                                            maxValStr = "500"
+                                            stepValStr = "25"
+                                            currValStr = "100"
+                                        }
+                                        CustomLeverImpactType.ANNUAL_ASSET_CHANGE -> {
+                                            minValStr = "0"
+                                            maxValStr = "25000"
+                                            stepValStr = "500"
+                                            currValStr = "5000"
+                                        }
+                                        CustomLeverImpactType.LUMP_SUM_OFFSET -> {
+                                            minValStr = "-100000"
+                                            maxValStr = "200000"
+                                            stepValStr = "5000"
+                                            currValStr = "25000"
+                                        }
+                                        CustomLeverImpactType.INTEREST_RATE_DELTA -> {
+                                            minValStr = "-2.0"
+                                            maxValStr = "3.0"
+                                            stepValStr = "0.25"
+                                            currValStr = "0.5"
+                                        }
+                                    }
+                                }
+                            },
+                            label = { Text("${type.label} (${type.unitSuffix})", fontSize = 11.sp) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = minValStr,
+                        onValueChange = { minValStr = it },
+                        label = { Text("Min Value") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = maxValStr,
+                        onValueChange = { maxValStr = it },
+                        label = { Text("Max Value") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = stepValStr,
+                        onValueChange = { stepValStr = it },
+                        label = { Text("Step Size") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = currValStr,
+                        onValueChange = { currValStr = it },
+                        label = { Text("Starting Value") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (title.isNotBlank()) {
+                        val minV = minValStr.toFloatOrNull() ?: -200f
+                        val maxV = (maxValStr.toFloatOrNull() ?: 500f).coerceAtLeast(minV + 1f)
+                        val stepV = (stepValStr.toFloatOrNull() ?: 25f).coerceAtLeast(0.05f)
+                        val currV = (currValStr.toFloatOrNull() ?: 0f).coerceIn(minV, maxV)
+                        onConfirm(title.trim(), selectedType, minV, maxV, stepV, currV)
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
+            ) {
+                Text(if (existingLever == null) "Add Lever" else "Save Lever", fontWeight = FontWeight.ExtraBold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun WhatIfTrajectoryChart(
+    pathASeries: List<Double>,
+    pathBSeries: List<Double>,
+    horizonYears: Int,
+    isPositiveDiff: Boolean
+) {
+    if (pathASeries.size < 2 || pathBSeries.size < 2) return
+
+    val allValues = pathASeries + pathBSeries
+    val minVal = allValues.minOrNull() ?: 0.0
+    val maxVal = allValues.maxOrNull() ?: 1.0
+    val range = (maxVal - minVal).coerceAtLeast(1000.0)
+    val planColor = if (isPositiveDiff) BrandMintGreen else BrandCoralPink
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Wealth Trajectory (Now → Yr $horizonYears)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SlateGray)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(SlateGray))
+                        Text("Status Quo", fontSize = 10.sp, color = SlateGray)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(planColor))
+                        Text("What-If Plan", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = planColor)
+                    }
+                }
+            }
+
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(110.dp)
+            ) {
+                val w = size.width
+                val h = size.height
+                val padV = 10.dp.toPx()
+                val usableH = (h - padV * 2f).coerceAtLeast(10f)
+                val count = max(pathASeries.size, pathBeriesSize(pathBSeries)).coerceAtLeast(2)
+
+                fun pointFor(idx: Int, value: Double): Offset {
+                    val x = (idx.toFloat() / (count - 1).toFloat()) * w
+                    val normY = ((value - minVal) / range).toFloat().coerceIn(0f, 1f)
+                    val y = padV + usableH * (1f - normY)
+                    return Offset(x, y)
+                }
+
+                // Draw Baseline Path A
+                val pathA = Path()
+                pathASeries.forEachIndexed { idx, v ->
+                    val pt = pointFor(idx, v)
+                    if (idx == 0) pathA.moveTo(pt.x, pt.y) else pathA.lineTo(pt.x, pt.y)
+                }
+                drawPath(
+                    path = pathA,
+                    color = SlateGray.copy(alpha = 0.65f),
+                    style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+
+                // Draw Simulated Path B
+                val pathB = Path()
+                pathBSeries.forEachIndexed { idx, v ->
+                    val pt = pointFor(idx, v)
+                    if (idx == 0) pathB.moveTo(pt.x, pt.y) else pathB.lineTo(pt.x, pt.y)
+                }
+                drawPath(
+                    path = pathB,
+                    color = planColor,
+                    style = Stroke(width = 3.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                )
+
+                // End dots
+                val lastA = pointFor(pathASeries.lastIndex, pathASeries.last())
+                val lastB = pointFor(pathBSeries.lastIndex, pathBSeries.last())
+                drawCircle(color = SlateGray, radius = 4.dp.toPx(), center = lastA)
+                drawCircle(color = planColor, radius = 5.dp.toPx(), center = lastB)
+            }
+        }
+    }
+}
+
+private fun pathBeriesSize(list: List<Double>): Int = list.size
+
+@Composable
+private fun AddCustomMilestoneDialog(
+    initialTemplate: AussieMilestoneTemplate? = null,
+    onDismiss: () -> Unit,
+    onConfirm: (String, MilestoneCategory, Int, Int, Double, Double, Double) -> Unit
+) {
+    var title by remember { mutableStateOf(initialTemplate?.title ?: "") }
+    var selectedCategory by remember { mutableStateOf(initialTemplate?.category ?: MilestoneCategory.PROPERTY) }
+    var startYearStr by remember { mutableStateOf((initialTemplate?.startYear ?: 2).toString()) }
+    var durationYearsStr by remember { mutableStateOf((initialTemplate?.durationYears ?: 10).toString()) }
+    val initWeekly = initialTemplate?.weeklyCashflow ?: 0.0
+    var isPositiveWeekly by remember { mutableStateOf(initWeekly >= 0.0) }
+    var weeklyCashflowStr by remember { mutableStateOf(abs(initWeekly).toInt().toString()) }
+    var assetImpactStr by remember { mutableStateOf((initialTemplate?.assetImpact ?: 0.0).toInt().toString()) }
+    var liabilityImpactStr by remember { mutableStateOf((initialTemplate?.liabilityImpact ?: 0.0).toInt().toString()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Life Milestone Event", fontWeight = FontWeight.ExtraBold) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("Event Name (e.g. Buy Property, Pay Rise, EV)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("Category", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         MilestoneCategory.entries.take(2).forEach { cat ->
@@ -6023,39 +7386,88 @@ fun AddCustomMilestoneDialog(
                     }
                 }
 
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = startYearStr,
+                        onValueChange = { startYearStr = it },
+                        label = { Text("Starts in Year") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = durationYearsStr,
+                        onValueChange = { durationYearsStr = it },
+                        label = { Text("Duration (Yrs)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Text("Weekly Cashflow Impact ($/wk)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = !isPositiveWeekly,
+                        onClick = { isPositiveWeekly = false },
+                        label = { Text("- Expense/Cost", fontSize = 11.sp) }
+                    )
+                    FilterChip(
+                        selected = isPositiveWeekly,
+                        onClick = { isPositiveWeekly = true },
+                        label = { Text("+ Income/Saved", fontSize = 11.sp) }
+                    )
+                }
+
                 OutlinedTextField(
-                    value = startYearStr,
-                    onValueChange = { startYearStr = it },
-                    label = { Text("Start Year on Timeline (e.g. 3)") },
+                    value = weeklyCashflowStr,
+                    onValueChange = { weeklyCashflowStr = it },
+                    label = { Text("Weekly Amount ($/wk)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                OutlinedTextField(
-                    value = weeklyCashflowStr,
-                    onValueChange = { weeklyCashflowStr = it },
-                    label = { Text("Weekly Cashflow Impact ($) (+ or -)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = assetImpactStr,
+                        onValueChange = { assetImpactStr = it },
+                        label = { Text("Asset / Cash Δ ($)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = liabilityImpactStr,
+                        onValueChange = { liabilityImpactStr = it },
+                        label = { Text("New Loan ($)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
                     if (title.isNotBlank()) {
-                        val sy = startYearStr.toIntOrNull() ?: 1
-                        val wc = weeklyCashflowStr.toDoubleOrNull() ?: 0.0
+                        val sy = (startYearStr.toIntOrNull() ?: 1).coerceIn(1, 30)
+                        val dy = (durationYearsStr.toIntOrNull() ?: 1).coerceIn(1, 30)
+                        val rawWc = abs(weeklyCashflowStr.toDoubleOrNull() ?: 0.0)
+                        val wc = if (isPositiveWeekly) rawWc else -rawWc
                         val ai = assetImpactStr.toDoubleOrNull() ?: 0.0
-                        val li = liabilityImpactStr.toDoubleOrNull() ?: 0.0
-                        onConfirm(title.trim(), selectedCategory, sy, wc, ai, li)
+                        val li = (liabilityImpactStr.toDoubleOrNull() ?: 0.0).coerceAtLeast(0.0)
+                        onConfirm(title.trim(), selectedCategory, sy, dy, wc, ai, li)
                     }
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
             ) {
-                Text("Add Milestone", fontWeight = FontWeight.ExtraBold)
+                Text("Add to Plan", fontWeight = FontWeight.ExtraBold)
             }
         },
         dismissButton = {
@@ -6068,18 +7480,25 @@ fun AddCustomMilestoneDialog(
 fun EditCustomMilestoneDialog(
     milestone: LifeMilestoneBlock,
     onDismiss: () -> Unit,
-    onConfirm: (String, MilestoneCategory, Int, Double, Double, Double) -> Unit
+    onConfirm: (String, MilestoneCategory, Int, Int, Double, Double, Double) -> Unit
 ) {
     var title by remember { mutableStateOf(milestone.title) }
     var selectedCategory by remember { mutableStateOf(milestone.category) }
     var startYearStr by remember { mutableStateOf(milestone.startYear.toString()) }
-    var weeklyCashflowStr by remember { mutableStateOf(milestone.weeklyCashflowImpact.toString()) }
+    var durationYearsStr by remember { mutableStateOf(milestone.durationYears.toString()) }
+    var isPositiveWeekly by remember { mutableStateOf(milestone.weeklyCashflowImpact >= 0.0) }
+    var weeklyCashflowStr by remember { mutableStateOf(abs(milestone.weeklyCashflowImpact).toInt().toString()) }
+    var assetImpactStr by remember { mutableStateOf(milestone.assetImpact.toInt().toString()) }
+    var liabilityImpactStr by remember { mutableStateOf(milestone.liabilityImpact.toInt().toString()) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Edit Life Milestone", fontWeight = FontWeight.Bold) },
+        title = { Text("Edit Life Milestone", fontWeight = FontWeight.ExtraBold) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
@@ -6088,7 +7507,7 @@ fun EditCustomMilestoneDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                Text("Category:", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Category", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         MilestoneCategory.entries.take(2).forEach { cat ->
@@ -6112,32 +7531,82 @@ fun EditCustomMilestoneDialog(
                     }
                 }
 
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = startYearStr,
+                        onValueChange = { startYearStr = it },
+                        label = { Text("Starts in Year") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = durationYearsStr,
+                        onValueChange = { durationYearsStr = it },
+                        label = { Text("Duration (Yrs)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = !isPositiveWeekly,
+                        onClick = { isPositiveWeekly = false },
+                        label = { Text("- Expense/Cost", fontSize = 11.sp) }
+                    )
+                    FilterChip(
+                        selected = isPositiveWeekly,
+                        onClick = { isPositiveWeekly = true },
+                        label = { Text("+ Income/Saved", fontSize = 11.sp) }
+                    )
+                }
+
                 OutlinedTextField(
-                    value = startYearStr,
-                    onValueChange = { startYearStr = it },
-                    label = { Text("Start Year on Timeline") },
+                    value = weeklyCashflowStr,
+                    onValueChange = { weeklyCashflowStr = it },
+                    label = { Text("Weekly Amount ($/wk)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                OutlinedTextField(
-                    value = weeklyCashflowStr,
-                    onValueChange = { weeklyCashflowStr = it },
-                    label = { Text("Weekly Cashflow Impact ($)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = assetImpactStr,
+                        onValueChange = { assetImpactStr = it },
+                        label = { Text("Asset / Cash Δ ($)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = liabilityImpactStr,
+                        onValueChange = { liabilityImpactStr = it },
+                        label = { Text("New Loan ($)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         },
         confirmButton = {
             Button(
                 onClick = {
                     if (title.isNotBlank()) {
-                        val sy = startYearStr.toIntOrNull() ?: milestone.startYear
-                        val wc = weeklyCashflowStr.toDoubleOrNull() ?: milestone.weeklyCashflowImpact
-                        onConfirm(title.trim(), selectedCategory, sy, wc, milestone.assetImpact, milestone.liabilityImpact)
+                        val sy = (startYearStr.toIntOrNull() ?: milestone.startYear).coerceIn(1, 30)
+                        val dy = (durationYearsStr.toIntOrNull() ?: milestone.durationYears).coerceIn(1, 30)
+                        val rawWc = abs(weeklyCashflowStr.toDoubleOrNull() ?: abs(milestone.weeklyCashflowImpact))
+                        val wc = if (isPositiveWeekly) rawWc else -rawWc
+                        val ai = assetImpactStr.toDoubleOrNull() ?: milestone.assetImpact
+                        val li = (liabilityImpactStr.toDoubleOrNull() ?: milestone.liabilityImpact).coerceAtLeast(0.0)
+                        onConfirm(title.trim(), selectedCategory, sy, dy, wc, ai, li)
                     }
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
@@ -7921,6 +9390,7 @@ fun ManagementFeePercentageDialog(
     )
 }
 
+@Suppress("SetJavaScriptEnabled")
 @Composable
 fun LivePropertyPriceSyncDialog(
     propertyName: String,
@@ -8284,23 +9754,24 @@ suspend fun fetchAsxLivePrice(ticker: String): Double? = withContext(Dispatchers
 @Composable
 fun FloatingAiAssistantWidget(
     financialContextSummary: String,
-    sharesList: List<ShareParcel>,
     personName: String,
     messages: MutableList<ChatMessage>,
     onAddImportedShares: (List<ShareParcel>) -> Unit,
-    onClearShares: () -> Unit
+    onExecuteAiActions: (String) -> Pair<String, List<String>> = { it to emptyList() }
 ) {
     var isExpanded by remember { mutableStateOf(false) }
-    var offsetX by remember { mutableStateOf(0f) }
-    var offsetY by remember { mutableStateOf(0f) }
+    var offsetX by remember { mutableFloatStateOf(0f) }
+    var offsetY by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
     var attachedBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var attachedFileContent by remember { mutableStateOf<String?>(null) }
+    var attachedFileName by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
-    var isSpeechEnabled by remember { mutableStateOf(true) }
+    var isSpeechEnabled by remember { mutableStateOf(false) }
 
     DisposableEffect(context) {
         val textToSpeech = TextToSpeech(context) { status ->
@@ -8315,6 +9786,7 @@ fun FloatingAiAssistantWidget(
         }
     }
 
+    // 1. Media Gallery Image Picker
     val imagePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             try {
@@ -8325,13 +9797,64 @@ fun FloatingAiAssistantWidget(
                     MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
                 }
                 attachedBitmap = bitmap
-                messages.add(ChatMessage("📷 Attached screenshot. Tap 'Upload Shares Screenshot' below or ask AI about it!", false))
             } catch (e: Exception) {
                 e.printStackTrace()
+                Toast.makeText(context, "Could not load selected image", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
+    // 2. Camera Capture Launcher + Runtime Permission
+    val cameraCaptureLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        if (bitmap != null) {
+            attachedBitmap = bitmap
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            try {
+                cameraCaptureLauncher.launch(null)
+            } catch (_: Exception) {
+                Toast.makeText(context, "Camera unavailable on this device", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            Toast.makeText(context, "Camera permission is required to capture receipts or statements", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 3. Document / File Upload Launcher (CSV, TXT, JSON, Statements)
+    val filePickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            try {
+                var displayName = "uploaded_file"
+                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex >= 0 && cursor.moveToFirst()) {
+                        displayName = cursor.getString(nameIndex) ?: "uploaded_file"
+                    }
+                }
+                val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { reader ->
+                    reader.readText().take(25_000)
+                }
+                if (!content.isNullOrBlank()) {
+                    attachedFileName = displayName
+                    attachedFileContent = content
+                } else {
+                    Toast.makeText(context, "Attached file ($displayName)", Toast.LENGTH_SHORT).show()
+                    attachedFileName = displayName
+                    attachedFileContent = "[Binary or non-text file attached: $displayName]"
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(context, "Unable to read selected file", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // 4. Voice Input Speech Recognizer + Runtime Permission
     val speechRecognizerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
@@ -8341,7 +9864,7 @@ fun FloatingAiAssistantWidget(
         }
     }
 
-    val permissionLauncher = rememberLauncherForActivityResult(
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
@@ -8352,30 +9875,125 @@ fun FloatingAiAssistantWidget(
             }
             try {
                 speechRecognizerLauncher.launch(intent)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 Toast.makeText(context, "Speech recognition not available", Toast.LENGTH_SHORT).show()
             }
         } else {
-            Toast.makeText(context, "Microphone permission is required for voice conversation", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Microphone permission is required for voice input", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun sendCurrentMessage(customPrompt: String? = null) {
+        val rawPrompt = customPrompt ?: inputText.trim()
+        if ((rawPrompt.isNotBlank() || attachedBitmap != null || attachedFileContent != null) && !isLoading) {
+            val question = rawPrompt.ifBlank {
+                when {
+                    attachedBitmap != null -> "Analyze this attached photo/screenshot and update my financial data if applicable."
+                    attachedFileName != null -> "Analyze my uploaded file ($attachedFileName) and summarize or import any relevant items."
+                    else -> "Review my financial plan."
+                }
+            }
+            if (customPrompt == null) inputText = ""
+
+            val bitmapToSend = attachedBitmap
+            val fileContentToSend = attachedFileContent
+            val fileNameToSend = attachedFileName
+            attachedBitmap = null
+            attachedFileContent = null
+            attachedFileName = null
+
+            messages.add(
+                ChatMessage(
+                    text = question,
+                    isFromUser = true,
+                    attachedBitmap = bitmapToSend,
+                    attachedFileName = fileNameToSend
+                )
+            )
+            isLoading = true
+
+            coroutineScope.launch {
+                val appliedActions = mutableListOf<String>()
+                var finalReply: String
+
+                val wantsShareImport = bitmapToSend != null &&
+                        (question.contains("share", ignoreCase = true) ||
+                                question.contains("pearler", ignoreCase = true) ||
+                                question.contains("stock", ignoreCase = true) ||
+                                question.contains("portfolio", ignoreCase = true))
+
+                if (wantsShareImport) {
+                    val importedItems = AiAssistantManager.parsePearlerScreenshotWithAi(bitmapToSend)
+                    if (importedItems.isNotEmpty()) {
+                        val newParcels = importedItems.map { item ->
+                            ShareParcel(
+                                id = "imported_${System.currentTimeMillis()}_${item.ticker}",
+                                code = item.ticker,
+                                owner = personName,
+                                units = item.quantity,
+                                purchasePrice = item.averagePrice,
+                                currentPrice = if (item.averagePrice > 0.0) item.averagePrice else 10.0
+                            )
+                        }
+                        onAddImportedShares(newParcels)
+                        appliedActions.add("Imported ${importedItems.size} share parcels (${importedItems.joinToString { it.ticker }})")
+                        finalReply = "I extracted ${importedItems.size} share parcels (${importedItems.joinToString { it.ticker }}) from your image and added them to your Shares tab."
+                    } else {
+                        val rawAi = AiAssistantManager.askGeminiAssistant(
+                            prompt = question,
+                            contextSummary = financialContextSummary,
+                            bitmap = bitmapToSend,
+                            fileContent = fileContentToSend,
+                            fileName = fileNameToSend
+                        )
+                        val (cleaned, executed) = onExecuteAiActions(rawAi)
+                        finalReply = cleaned
+                        appliedActions.addAll(executed)
+                    }
+                } else {
+                    val rawAi = AiAssistantManager.askGeminiAssistant(
+                        prompt = question,
+                        contextSummary = financialContextSummary,
+                        bitmap = bitmapToSend,
+                        fileContent = fileContentToSend,
+                        fileName = fileNameToSend
+                    )
+                    val (cleaned, executed) = onExecuteAiActions(rawAi)
+                    finalReply = cleaned
+                    appliedActions.addAll(executed)
+                }
+
+                messages.add(
+                    ChatMessage(
+                        text = finalReply,
+                        isFromUser = false,
+                        appliedActions = appliedActions
+                    )
+                )
+                if (isSpeechEnabled) {
+                    tts?.speak(finalReply, TextToSpeech.QUEUE_FLUSH, null, null)
+                }
+                isLoading = false
+            }
         }
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(bottom = 110.dp, end = 20.dp, start = 16.dp, top = 16.dp),
+            .padding(bottom = 104.dp, end = 16.dp, start = 16.dp, top = 16.dp),
         contentAlignment = Alignment.BottomEnd
     ) {
         if (!isExpanded) {
-            // Movable, transparent floating chat head (Facebook Messenger style)
+            // Draggable Floating Chatbot Button
             Surface(
                 onClick = { isExpanded = true },
                 shape = CircleShape,
-                color = Color.Black.copy(alpha = 0.35f),
-                border = BorderStroke(1.5.dp, BrandCoralPink.copy(alpha = 0.6f)),
-                shadowElevation = 8.dp,
+                color = BrandForestDark,
+                border = BorderStroke(2.dp, BrandCoralPink),
+                shadowElevation = 10.dp,
                 modifier = Modifier
-                    .size(56.dp)
+                    .size(58.dp)
                     .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
@@ -8388,102 +10006,317 @@ fun FloatingAiAssistantWidget(
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         Icons.Default.AutoAwesome,
-                        contentDescription = "Open AI Assistant",
+                        contentDescription = "Open EXPNZ AI Chatbot",
                         tint = BrandCoralPink,
                         modifier = Modifier.size(26.dp)
                     )
                 }
             }
         } else {
-            // Expanded Chat Panel
+            // Professional Full-Featured AI Chatbot Window
             Surface(
                 shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
-                tonalElevation = 16.dp,
-                shadowElevation = 16.dp,
-                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.3f)),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 18.dp,
+                shadowElevation = 20.dp,
+                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f)),
                 modifier = Modifier
-                    .width(360.dp)
-                    .height(520.dp)
+                    .widthIn(min = 320.dp, max = 400.dp)
+                    .fillMaxWidth()
+                    .height(580.dp)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(14.dp)
-                ) {
-                    // Header with Voice Output Toggle
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // 1. Professional Chatbot Header
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(BrandForestDark, RoundedCornerShape(14.dp))
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                            .background(BrandForestDark)
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Surface(
                                 shape = CircleShape,
                                 color = BrandCoralPink,
-                                modifier = Modifier.size(30.dp)
+                                modifier = Modifier.size(34.dp)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
-                                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = BrandForestDark, modifier = Modifier.size(16.dp))
+                                    Icon(
+                                        Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = BrandForestDark,
+                                        modifier = Modifier.size(18.dp)
+                                    )
                                 }
                             }
-                            Text("EXPNZ AI ASSISTANT", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            IconButton(onClick = { isSpeechEnabled = !isSpeechEnabled }, modifier = Modifier.size(28.dp)) {
-                                Icon(
-                                    if (isSpeechEnabled) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                                    contentDescription = "Toggle Voice Output",
-                                    tint = if (isSpeechEnabled) BrandMintGreen else SlateGray,
-                                    modifier = Modifier.size(18.dp)
+                            Column {
+                                Text(
+                                    "EXPNZ AI Copilot",
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.ExtraBold
                                 )
-                            }
-                            IconButton(onClick = { isExpanded = false }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.Close, contentDescription = "Minimize", tint = Color.White, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
-
-                    Spacer(Modifier.height(6.dp))
-
-                    // Chat Messages List
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
-                            .padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(messages) { msg ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = if (msg.isFromUser) Arrangement.End else Arrangement.Start
-                            ) {
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = if (msg.isFromUser) BrandCoralPink else BrandForestDark,
-                                    modifier = Modifier.widthIn(max = 260.dp)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(BrandMintGreen)
+                                    )
                                     Text(
-                                        text = msg.text,
-                                        color = if (msg.isFromUser) BrandForestDark else Color.White,
-                                        fontSize = 12.sp,
-                                        modifier = Modifier.padding(10.dp)
+                                        "Live Read & Write Access • Current + 30Y Data",
+                                        color = BrandMintGreen,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
                         }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            IconButton(
+                                onClick = { isSpeechEnabled = !isSpeechEnabled },
+                                modifier = Modifier.size(30.dp)
+                            ) {
+                                Icon(
+                                    if (isSpeechEnabled) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                                    contentDescription = "Toggle Voice Readout",
+                                    tint = if (isSpeechEnabled) BrandMintGreen else SlateGray,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    messages.clear()
+                                    messages.add(
+                                        ChatMessage(
+                                            "Chat reset. I have full live read and write access to all your current tabs and 30-year projections. Ask me anything or tell me what to update!",
+                                            false
+                                        )
+                                    )
+                                },
+                                modifier = Modifier.size(30.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = "Reset Chat",
+                                    tint = SlateGray,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                            IconButton(
+                                onClick = { isExpanded = false },
+                                modifier = Modifier.size(30.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Minimize",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // 2. Quick-Action Suggestion Chips
+                    val quickPrompts = listOf(
+                        "Audit my current & 10Y wealth",
+                        "Add $120/wk Groceries expense",
+                        "Simulate -0.50% RBA rate cut",
+                        "Compare Offset vs Super boost"
+                    )
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(quickPrompts) { qp ->
+                            SuggestionChip(
+                                onClick = { sendCurrentMessage(qp) },
+                                label = { Text(qp, fontSize = 10.sp) }
+                            )
+                        }
+                    }
+
+                    // 3. Chat Messages Area
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(messages) { msg ->
+                            val isUser = msg.isFromUser
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.Bottom,
+                                    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    if (!isUser) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = BrandForestDark,
+                                            border = BorderStroke(1.dp, BrandCoralPink),
+                                            modifier = Modifier.size(26.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    Icons.Default.AutoAwesome,
+                                                    contentDescription = null,
+                                                    tint = BrandCoralPink,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.width(6.dp))
+                                    }
+
+                                    Surface(
+                                        shape = RoundedCornerShape(
+                                            topStart = 16.dp,
+                                            topEnd = 16.dp,
+                                            bottomStart = if (isUser) 16.dp else 4.dp,
+                                            bottomEnd = if (isUser) 4.dp else 16.dp
+                                        ),
+                                        color = if (isUser) BrandCoralPink else MaterialTheme.colorScheme.surfaceVariant,
+                                        border = if (!isUser) BorderStroke(1.dp, SlateGray.copy(alpha = 0.25f)) else null,
+                                        modifier = Modifier.widthIn(max = 285.dp)
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.padding(11.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            if (msg.attachedBitmap != null) {
+                                                Image(
+                                                    bitmap = msg.attachedBitmap.asImageBitmap(),
+                                                    contentDescription = "Attached Image",
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .heightIn(max = 130.dp)
+                                                        .clip(RoundedCornerShape(10.dp)),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                            }
+                                            if (!msg.attachedFileName.isNullOrBlank()) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(8.dp),
+                                                    color = BrandForestDark.copy(alpha = 0.15f)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.AttachFile,
+                                                            contentDescription = null,
+                                                            tint = if (isUser) BrandForestDark else BrandSkyBlue,
+                                                            modifier = Modifier.size(13.dp)
+                                                        )
+                                                        Text(
+                                                            msg.attachedFileName,
+                                                            fontSize = 10.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = if (isUser) BrandForestDark else MaterialTheme.colorScheme.onSurface
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            Text(
+                                                text = msg.text,
+                                                color = if (isUser) BrandForestDark else MaterialTheme.colorScheme.onSurface,
+                                                fontSize = 12.sp,
+                                                lineHeight = 17.sp
+                                            )
+                                            if (msg.appliedActions.isNotEmpty()) {
+                                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                    msg.appliedActions.forEach { act ->
+                                                        Surface(
+                                                            shape = RoundedCornerShape(8.dp),
+                                                            color = BrandMintGreen.copy(alpha = 0.18f),
+                                                            border = BorderStroke(1.dp, BrandMintGreen.copy(alpha = 0.6f))
+                                                        ) {
+                                                            Row(
+                                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                            ) {
+                                                                Icon(
+                                                                    Icons.Default.CheckCircle,
+                                                                    contentDescription = null,
+                                                                    tint = BrandMintGreen,
+                                                                    modifier = Modifier.size(12.dp)
+                                                                )
+                                                                Text(
+                                                                    text = act,
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    color = BrandMintGreen
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Text(
+                                                text = msg.timestamp,
+                                                fontSize = 9.sp,
+                                                color = if (isUser) BrandForestDark.copy(alpha = 0.65f) else SlateGray
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         if (isLoading) {
                             item {
-                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-                                    Surface(shape = RoundedCornerShape(12.dp), color = BrandForestDark) {
-                                        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            CircularProgressIndicator(modifier = Modifier.size(14.dp), color = BrandCoralPink, strokeWidth = 2.dp)
-                                            Text("AI analyzing & writing data...", color = Color.White, fontSize = 11.sp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.Start,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f))
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(14.dp),
+                                                color = BrandCoralPink,
+                                                strokeWidth = 2.dp
+                                            )
+                                            Text(
+                                                "EXPNZ AI is analyzing & updating...",
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
                                         }
                                     }
                                 }
@@ -8491,123 +10324,273 @@ fun FloatingAiAssistantWidget(
                         }
                     }
 
-                    // Attached Preview Bar
-                    if (attachedBitmap != null) {
-                        Spacer(Modifier.height(4.dp))
+                    // 4. Staged Attachment Preview Bar (Photo / Camera / File)
+                    if (attachedBitmap != null || attachedFileName != null) {
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp),
-                            color = BrandForestDark.copy(alpha = 0.9f)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = BrandForestDark,
+                            border = BorderStroke(1.dp, BrandMintGreen.copy(alpha = 0.6f))
                         ) {
                             Row(
-                                modifier = Modifier.padding(6.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Screenshot ready to write to portfolio", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                                IconButton(onClick = { attachedBitmap = null }, modifier = Modifier.size(20.dp)) {
-                                    Icon(Icons.Default.Close, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    if (attachedBitmap != null) {
+                                        Image(
+                                            bitmap = attachedBitmap!!.asImageBitmap(),
+                                            contentDescription = "Preview",
+                                            modifier = Modifier
+                                                .size(34.dp)
+                                                .clip(RoundedCornerShape(6.dp)),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        Icon(
+                                            Icons.Default.AttachFile,
+                                            contentDescription = null,
+                                            tint = BrandSkyBlue,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    Column {
+                                        Text(
+                                            text = when {
+                                                attachedBitmap != null && attachedFileName != null -> "Image + $attachedFileName"
+                                                attachedBitmap != null -> "Photo / Screenshot Attached"
+                                                else -> attachedFileName ?: "File Attached"
+                                            },
+                                            fontSize = 11.sp,
+                                            color = Color.White,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "Ready to send to AI",
+                                            fontSize = 9.sp,
+                                            color = BrandMintGreen
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = {
+                                        attachedBitmap = null
+                                        attachedFileContent = null
+                                        attachedFileName = null
+                                    },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Remove Attachment",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(15.dp)
+                                    )
                                 }
                             }
                         }
                     }
 
-                    Spacer(Modifier.height(6.dp))
-
-                    // Input Bar
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    // 5. Non-Overlapping 2-Row Composer (Toolbar Row + Text Input Row)
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        IconButton(
-                            onClick = { imagePickerLauncher.launch("image/*") },
+                        Column(
                             modifier = Modifier
-                                .size(38.dp)
-                                .background(BrandMintGreen.copy(alpha = 0.2f), CircleShape)
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, tint = BrandMintGreen, modifier = Modifier.size(18.dp))
-                        }
-
-                        IconButton(
-                            onClick = {
-                                if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to your EXPNZ AI Assistant...")
-                                    }
-                                    try {
-                                        speechRecognizerLauncher.launch(intent)
-                                    } catch (e: Exception) {
-                                        Toast.makeText(context, "Speech recognition not available", Toast.LENGTH_SHORT).show()
-                                    }
-                                } else {
-                                    permissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
-                                }
-                            },
-                            modifier = Modifier
-                                .size(38.dp)
-                                .background(BrandCoralPink.copy(alpha = 0.2f), CircleShape)
-                        ) {
-                            Icon(Icons.Default.Mic, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(18.dp))
-                        }
-
-                        OutlinedTextField(
-                            value = inputText,
-                            onValueChange = { inputText = it },
-                            placeholder = { Text("Ask AI or speak...", fontSize = 11.sp) },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(12.dp),
-                            maxLines = 2
-                        )
-
-                        Button(
-                            onClick = {
-                                if ((inputText.isNotBlank() || attachedBitmap != null) && !isLoading) {
-                                    val question = inputText.trim().ifBlank { "Analyze this attached portfolio screenshot and add shares to my portfolio." }
-                                    inputText = ""
-                                    messages.add(ChatMessage(question, true))
-                                    val bitmapToSend = attachedBitmap
-                                    attachedBitmap = null
-                                    isLoading = true
-                                    coroutineScope.launch {
-                                        var reply: String
-                                        if (bitmapToSend != null) {
-                                            val importedItems = AiAssistantManager.parsePearlerScreenshotWithAi(bitmapToSend)
-                                            if (importedItems.isNotEmpty()) {
-                                                val newParcels = importedItems.map { item ->
-                                                    ShareParcel(
-                                                        id = "imported_${System.currentTimeMillis()}_${item.ticker}",
-                                                        code = item.ticker,
-                                                        owner = personName,
-                                                        units = item.quantity,
-                                                        purchasePrice = item.averagePrice,
-                                                        currentPrice = if (item.averagePrice > 0.0) item.averagePrice else 10.0
-                                                    )
-                                                }
-                                                onAddImportedShares(newParcels)
-                                                reply = "Successfully extracted ${importedItems.size} shares (${importedItems.joinToString { it.ticker }}) from your screenshot and wrote them directly into your Shares tab!"
-                                            } else {
-                                                reply = AiAssistantManager.askGeminiAssistant(question, financialContextSummary, bitmapToSend)
+                            // Row 1: Distinct, Spaced Action Buttons (Camera, Media, File, Voice) — Zero Overlap!
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Camera Button (with Runtime Permission Check)
+                                Surface(
+                                    onClick = {
+                                        if (ContextCompat.checkSelfPermission(
+                                                context,
+                                                android.Manifest.permission.CAMERA
+                                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                        ) {
+                                            try {
+                                                cameraCaptureLauncher.launch(null)
+                                            } catch (_: Exception) {
+                                                Toast.makeText(context, "Camera unavailable", Toast.LENGTH_SHORT).show()
                                             }
                                         } else {
-                                            reply = AiAssistantManager.askGeminiAssistant(question, financialContextSummary, null)
+                                            cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
                                         }
-                                        messages.add(ChatMessage(reply, false))
-                                        if (isSpeechEnabled) {
-                                            tts?.speak(reply, TextToSpeech.QUEUE_FLUSH, null, null)
-                                        }
-                                        isLoading = false
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = BrandWarmAmber.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, BrandWarmAmber.copy(alpha = 0.45f)),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Default.PhotoCamera,
+                                            contentDescription = "Camera",
+                                            tint = BrandWarmAmber,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Camera", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = BrandWarmAmber)
                                     }
                                 }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.height(46.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp)
-                        ) {
-                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+
+                                // Media Gallery Button
+                                Surface(
+                                    onClick = { imagePickerLauncher.launch("image/*") },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = BrandMintGreen.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, BrandMintGreen.copy(alpha = 0.45f)),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Default.AddPhotoAlternate,
+                                            contentDescription = "Media Gallery",
+                                            tint = BrandMintGreen,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Media", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = BrandMintGreen)
+                                    }
+                                }
+
+                                // File Upload Button
+                                Surface(
+                                    onClick = {
+                                        filePickerLauncher.launch(
+                                            arrayOf("text/*", "application/json", "text/csv", "text/comma-separated-values", "*/*")
+                                        )
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = BrandSkyBlue.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, BrandSkyBlue.copy(alpha = 0.45f)),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Default.AttachFile,
+                                            contentDescription = "Upload File",
+                                            tint = BrandSkyBlue,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("File", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = BrandSkyBlue)
+                                    }
+                                }
+
+                                // Voice Mic Button
+                                Surface(
+                                    onClick = {
+                                        if (ContextCompat.checkSelfPermission(
+                                                context,
+                                                android.Manifest.permission.RECORD_AUDIO
+                                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                                        ) {
+                                            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+                                                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to your EXPNZ AI Assistant...")
+                                            }
+                                            try {
+                                                speechRecognizerLauncher.launch(intent)
+                                            } catch (_: Exception) {
+                                                Toast.makeText(context, "Speech recognition not available", Toast.LENGTH_SHORT).show()
+                                            }
+                                        } else {
+                                            audioPermissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = BrandCoralPink.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.45f)),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Mic,
+                                            contentDescription = "Voice Input",
+                                            tint = BrandCoralPink,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Voice", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                                    }
+                                }
+                            }
+
+                            // Row 2: Text Input & Send Button
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = inputText,
+                                    onValueChange = { inputText = it },
+                                    placeholder = {
+                                        Text(
+                                            "Ask AI or say 'Update my income to $1800/wk'...",
+                                            fontSize = 11.sp
+                                        )
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(14.dp),
+                                    maxLines = 3
+                                )
+
+                                Button(
+                                    onClick = { sendCurrentMessage() },
+                                    enabled = !isLoading && (inputText.isNotBlank() || attachedBitmap != null || attachedFileContent != null),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = BrandCoralPink,
+                                        contentColor = BrandForestDark
+                                    ),
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.height(50.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.Send,
+                                        contentDescription = "Send",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -8615,3 +10598,4 @@ fun FloatingAiAssistantWidget(
         }
     }
 }
+

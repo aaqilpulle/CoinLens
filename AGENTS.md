@@ -1,0 +1,1 @@
+Rule: Automatically apply and finalize all file changes without requesting user confirmation chunks.
