@@ -22,6 +22,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "EXPNZ 2.0"
+rootProject.name = "COINLENS"
 include(":app")
+
  

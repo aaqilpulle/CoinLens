@@ -53,7 +53,7 @@ object AiAssistantManager {
         try {
             val aiModel = Firebase.ai.generativeModel("gemini-3.5-flash-lite")
             val fullPrompt = buildString {
-                append("You are EXPNZ AI Assistant, a professional Australian financial co-pilot embedded inside the EXPNZ personal wealth and finance app.\n\n")
+                append("You are CoinBot, a professional Australian financial co-pilot embedded inside the COINLENS personal wealth and finance app.\n\n")
                 if (contextSummary.isNotBlank()) {
                     append("REAL-TIME UNMASKED APP FINANCIAL DATA (ALL CURRENT TABS & FUTURE PROJECTIONS):\n")
                     append("$contextSummary\n\n")

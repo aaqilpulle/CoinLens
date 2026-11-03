@@ -59,7 +59,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -123,9 +126,9 @@ fun Context.getActivity(): Activity? {
 // ============================================================================
 // BRAND LOGO COLOR PALETTE (DEEP FOREST EMERALD & CORAL ROSE)
 // ============================================================================
-val BrandForestDark = Color(0xFF0B2B26)      // Exact Deep Forest background from logo
-val BrandForestSurface = Color(0xFF133A33)   // Elevated Forest card surface
-val BrandForestVariant = Color(0xFF1C4E45)   // Highlighted Forest container
+val BrandForestDark = Color(0xFF041410)      // Much darker Deep Forest background matching COINLENS logo
+val BrandForestSurface = Color(0xFF0A221C)   // Elevated Dark Forest card surface
+val BrandForestVariant = Color(0xFF11352C)   // Highlighted Dark Forest container
 val BrandCoralPink = Color(0xFFE38391)       // Exact Coral Rose from logo wallet & arrow
 val BrandCoralLight = Color(0xFFF3A6B2)      // Soft Rose highlight
 val BrandMintGreen = Color(0xFF34D399)       // Accessible Mint Green (Inflow / Positive)
@@ -808,7 +811,7 @@ fun AlertDialog(
 }
 
 // ============================================================================
-// CUSTOM VECTOR APP LOGO COMPOSABLE (MATCHES UPLOADED WALLET + ARROW IMAGE)
+// CUSTOM VECTOR APP LOGO COMPOSABLE (MATCHES COINLENS CORAL 'C' + EMERALD 'L' & CHART LOGO)
 // ============================================================================
 @Composable
 fun AppLogoIcon(
@@ -817,70 +820,191 @@ fun AppLogoIcon(
     backgroundColor: Color = BrandForestDark,
     foregroundColor: Color = BrandCoralPink
 ) {
+    val shape = RoundedCornerShape(size * 0.26f)
     Box(
         modifier = modifier
             .size(size)
-            .clip(RoundedCornerShape(size * 0.26f))
+            .clip(shape)
             .background(backgroundColor)
-            .border(1.dp, foregroundColor.copy(alpha = 0.35f), RoundedCornerShape(size * 0.26f)),
+            .border(
+                width = 1.dp,
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        foregroundColor.copy(alpha = 0.45f),
+                        BrandMintGreen.copy(alpha = 0.45f)
+                    )
+                ),
+                shape = shape
+            ),
         contentAlignment = Alignment.Center
     ) {
-        Canvas(modifier = Modifier.fillMaxSize().padding(size * 0.16f)) {
+        Canvas(modifier = Modifier.fillMaxSize().padding(size * 0.12f)) {
             val w = this.size.width
             val h = this.size.height
-            val strokeW = w * 0.105f
+            val strokeW = w * 0.115f
 
-            // Top flap of wallet
-            val flapPath = Path().apply {
-                moveTo(w * 0.16f, h * 0.28f)
-                lineTo(w * 0.62f, h * 0.12f)
-                quadraticTo(w * 0.72f, h * 0.09f, w * 0.75f, h * 0.24f)
+            val coralBrush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFF5A3B0),
+                    foregroundColor,
+                    Color(0xFFB84A5A)
+                ),
+                start = Offset(0f, 0f),
+                end = Offset(w * 0.8f, h)
+            )
+            val coralHighlightBrush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFFFFDCE2).copy(alpha = 0.80f),
+                    foregroundColor.copy(alpha = 0.25f),
+                    Color(0xFFFFC4CE).copy(alpha = 0.65f)
+                ),
+                start = Offset(0f, 0f),
+                end = Offset(w * 0.7f, h)
+            )
+            val emeraldBrush = Brush.linearGradient(
+                colors = listOf(
+                    Color(0xFF7CF5CC),
+                    BrandMintGreen,
+                    Color(0xFF1E7A5C)
+                ),
+                start = Offset(w * 0.35f, h * 0.15f),
+                end = Offset(w * 0.90f, h * 0.75f)
+            )
+            val emeraldHighlight = Color(0xFFD8FFF0).copy(alpha = 0.75f)
+
+            // 1. Coral-Rose 3D Glass 'C' Arc (Left & Outer)
+            val cTopLeft = Offset(w * 0.06f, h * 0.08f)
+            val cSize = Size(w * 0.76f, h * 0.84f)
+            // Soft outer coral glow
+            drawArc(
+                color = foregroundColor.copy(alpha = 0.18f),
+                startAngle = 42f,
+                sweepAngle = 266f,
+                useCenter = false,
+                topLeft = cTopLeft,
+                size = cSize,
+                style = Stroke(width = strokeW * 1.65f, cap = StrokeCap.Round)
+            )
+            // Main tubular 'C' body
+            drawArc(
+                brush = coralBrush,
+                startAngle = 42f,
+                sweepAngle = 266f,
+                useCenter = false,
+                topLeft = cTopLeft,
+                size = cSize,
+                style = Stroke(width = strokeW * 1.18f, cap = StrokeCap.Round)
+            )
+            // Inner glass core refraction on 'C'
+            drawArc(
+                brush = coralHighlightBrush,
+                startAngle = 46f,
+                sweepAngle = 258f,
+                useCenter = false,
+                topLeft = cTopLeft,
+                size = cSize,
+                style = Stroke(width = strokeW * 0.48f, cap = StrokeCap.Round)
+            )
+            // Bright specular glass highlight along upper-left curve of 'C'
+            drawArc(
+                color = Color.White.copy(alpha = 0.65f),
+                startAngle = 150f,
+                sweepAngle = 95f,
+                useCenter = false,
+                topLeft = Offset(cTopLeft.x + strokeW * 0.12f, cTopLeft.y + strokeW * 0.12f),
+                size = Size(cSize.width - strokeW * 0.24f, cSize.height - strokeW * 0.24f),
+                style = Stroke(width = strokeW * 0.18f, cap = StrokeCap.Round)
+            )
+
+            // 2. Emerald-Mint 3D Glass 'L' Frame (Nested inside right side of 'C')
+            val lPath = Path().apply {
+                moveTo(w * 0.58f, h * 0.45f)
+                lineTo(w * 0.40f, h * 0.68f)
+                lineTo(w * 0.82f, h * 0.68f)
             }
             drawPath(
-                path = flapPath,
-                color = foregroundColor,
-                style = Stroke(width = strokeW * 0.85f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                path = lPath,
+                color = BrandMintGreen.copy(alpha = 0.20f),
+                style = Stroke(width = strokeW * 1.05f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+            drawPath(
+                path = lPath,
+                brush = emeraldBrush,
+                style = Stroke(width = strokeW * 0.72f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+            drawPath(
+                path = lPath,
+                color = emeraldHighlight,
+                style = Stroke(width = strokeW * 0.18f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
 
-            // Main wallet body outline
+            // 3. Three Rising Emerald Glass Chart Bars inside the 'L'
+            val barCorner = CornerRadius(w * 0.028f, w * 0.028f)
+            // Small bar
             drawRoundRect(
-                color = foregroundColor,
-                topLeft = Offset(w * 0.10f, h * 0.28f),
-                size = Size(w * 0.76f, h * 0.60f),
-                cornerRadius = CornerRadius(w * 0.14f, w * 0.14f),
-                style = Stroke(width = strokeW, cap = StrokeCap.Round)
+                brush = emeraldBrush,
+                topLeft = Offset(w * 0.54f, h * 0.53f),
+                size = Size(w * 0.062f, h * 0.09f),
+                cornerRadius = barCorner
             )
-
-            // Wallet clasp on right side
+            // Medium bar
             drawRoundRect(
-                color = foregroundColor,
-                topLeft = Offset(w * 0.68f, h * 0.49f),
-                size = Size(w * 0.18f, h * 0.18f),
-                cornerRadius = CornerRadius(w * 0.09f, w * 0.09f),
-                style = Stroke(width = strokeW * 0.85f)
+                brush = emeraldBrush,
+                topLeft = Offset(w * 0.63f, h * 0.45f),
+                size = Size(w * 0.068f, h * 0.17f),
+                cornerRadius = barCorner
+            )
+            // Tall glossy bar
+            drawRoundRect(
+                brush = emeraldBrush,
+                topLeft = Offset(w * 0.725f, h * 0.34f),
+                size = Size(w * 0.095f, h * 0.28f),
+                cornerRadius = CornerRadius(w * 0.04f, w * 0.04f)
+            )
+            drawRoundRect(
+                color = emeraldHighlight,
+                topLeft = Offset(w * 0.74f, h * 0.355f),
+                size = Size(w * 0.065f, h * 0.25f),
+                cornerRadius = CornerRadius(w * 0.03f, w * 0.03f),
+                style = Stroke(width = strokeW * 0.13f)
             )
 
-            // Rising trend zig-zag arrow cutting across wallet
-            val arrowLinePath = Path().apply {
-                moveTo(w * 0.06f, h * 0.88f)
-                lineTo(w * 0.40f, h * 0.50f)
-                lineTo(w * 0.54f, h * 0.64f)
-                lineTo(w * 0.90f, h * 0.20f)
+            // 4. Rising Zig-Zag Emerald Trend Arrow above the 'L'
+            val arrowShaftPath = Path().apply {
+                moveTo(w * 0.52f, h * 0.38f)
+                lineTo(w * 0.60f, h * 0.29f)
+                lineTo(w * 0.66f, h * 0.34f)
+                lineTo(w * 0.86f, h * 0.15f)
             }
             drawPath(
-                path = arrowLinePath,
-                color = foregroundColor,
-                style = Stroke(width = strokeW * 1.25f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                path = arrowShaftPath,
+                color = BrandMintGreen.copy(alpha = 0.22f),
+                style = Stroke(width = strokeW * 1.15f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+            drawPath(
+                path = arrowShaftPath,
+                brush = emeraldBrush,
+                style = Stroke(width = strokeW * 0.76f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+            drawPath(
+                path = arrowShaftPath,
+                color = emeraldHighlight,
+                style = Stroke(width = strokeW * 0.20f, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
 
-            // Arrowhead at top right
+            // Arrowhead at top-right
             val arrowHeadPath = Path().apply {
-                moveTo(w * 0.95f, h * 0.14f)
-                lineTo(w * 0.68f, h * 0.20f)
-                lineTo(w * 0.89f, h * 0.40f)
+                moveTo(w * 0.90f, h * 0.11f)
+                lineTo(w * 0.73f, h * 0.14f)
+                lineTo(w * 0.86f, h * 0.27f)
                 close()
             }
-            drawPath(path = arrowHeadPath, color = foregroundColor)
+            drawPath(path = arrowHeadPath, brush = emeraldBrush)
+            drawPath(
+                path = arrowHeadPath,
+                color = emeraldHighlight,
+                style = Stroke(width = strokeW * 0.14f, join = StrokeJoin.Round)
+            )
         }
     }
 }
@@ -1278,6 +1402,7 @@ fun computeWhatIfProjection(
     hasSecondProperty: Boolean,
     showLoans: Boolean,
     lifestyleAdjustmentWeekly: Float,
+    incomeGrowthWeekly: Float = 0f,
     rateShockProp1: Float,
     rateShockProp2: Float,
     rentalIncomeGrowthWeekly: Float,
@@ -1367,7 +1492,7 @@ fun computeWhatIfProjection(
     val activeMilestones = milestones.filter { it.isEnabled }
     for (year in 1..safeHorizon) {
         var activeWeeklyDelta =
-            lifestyleAdjustmentWeekly.toDouble() - totalWeeklyRateCost + rentalIncomeGrowthWeekly.toDouble() + customWeeklyCashflow
+            lifestyleAdjustmentWeekly.toDouble() + incomeGrowthWeekly.toDouble() - totalWeeklyRateCost + rentalIncomeGrowthWeekly.toDouble() + customWeeklyCashflow
         var propAssetAdd = 0.0
         var investAssetAdd = 0.0
         var otherAssetAdd = 0.0
@@ -1498,7 +1623,7 @@ fun ExpenseTrackerApp(
     val geminiMessages = remember {
         mutableStateListOf(
             ChatMessage(
-                text = "Hello $activeLoggedInPersonName. I am the EXPNZ AI Assistant. Looking at your EXPNZ Wealth overview, how can I assist you with your goals today?",
+                text = "Hello $activeLoggedInPersonName. I am CoinBot. Looking at your COINLENS Wealth overview, how can I assist you with your goals today?",
                 isFromUser = false
             )
         )
@@ -1506,7 +1631,7 @@ fun ExpenseTrackerApp(
     LaunchedEffect(activeLoggedInPersonName) {
         if (geminiMessages.size == 1 && !geminiMessages[0].isFromUser) {
             geminiMessages[0] = ChatMessage(
-                text = "Hello $activeLoggedInPersonName. I am the EXPNZ AI Assistant. Looking at your EXPNZ Wealth overview, how can I assist you with your goals today?",
+                text = "Hello $activeLoggedInPersonName. I am CoinBot. Looking at your COINLENS Wealth overview, how can I assist you with your goals today?",
                 isFromUser = false
             )
         }
@@ -2098,13 +2223,12 @@ fun ExpenseTrackerApp(
 
     if (isBiometricEnabled && !isBiometricAuthenticated) {
         BiometricLockScreen(
-            appSubtitle = "EXPNZ",
             onUnlockClick = {
                 val fragmentActivity = context as? FragmentActivity
                 if (fragmentActivity != null) {
                     showBiometricPrompt(
                         activity = fragmentActivity,
-                        title = "Unlock EXPNZ",
+                        title = "Unlock COINLENS",
                         subtitle = "Scan fingerprint to access your financial data",
                         onSuccess = {
                             isBiometricAuthenticated = true
@@ -2124,7 +2248,7 @@ fun ExpenseTrackerApp(
             if (fragmentActivity != null) {
                 showBiometricPrompt(
                     activity = fragmentActivity,
-                    title = "Unlock EXPNZ",
+                    title = "Unlock COINLENS",
                     subtitle = "Scan fingerprint to access your financial data",
                     onSuccess = {
                         isBiometricAuthenticated = true
@@ -2210,22 +2334,22 @@ fun ExpenseTrackerApp(
 
     // Dynamic Mortgage Repayments (consistent across all tabs using loan's originalTermYears & showLoans toggle)
     val prop1FortnightlyPmt = calculateEffectiveFortnightlyRepayment(prop1Loan)
-    val prop1WeeklyMortgage = if (appConfig.showLoans) -(prop1FortnightlyPmt / 2.0) else 0.0
+    val prop1WeeklyMortgage = if (appConfig.showLoans && !appConfig.isProperty1Rented) -(prop1FortnightlyPmt / 2.0) else 0.0
 
     val prop2FortnightlyPmt = if (appConfig.hasSecondProperty) {
         calculateEffectiveFortnightlyRepayment(prop2Loan)
     } else 0.0
-    val prop2WeeklyMortgage = if (appConfig.showLoans && appConfig.hasSecondProperty) -(prop2FortnightlyPmt / 2.0) else 0.0
+    val prop2WeeklyMortgage = if (appConfig.showLoans && appConfig.hasSecondProperty && !appConfig.isProperty2Rented) -(prop2FortnightlyPmt / 2.0) else 0.0
 
     val p1AutoFortnights = getElapsedFortnightsSinceStart(prop1Loan.startDateStr)
     val p1Schedule = generateAmortizationSchedule(prop1Loan, 780)
     val p1CurrentRow = p1Schedule.getOrNull(p1AutoFortnights.coerceIn(0, p1Schedule.size - 1)) ?: p1Schedule.first()
-    val prop1LiveBalance = if (appConfig.showLoans) p1CurrentRow.closingBalance else 0.0
+    val prop1LiveBalance = if (appConfig.showLoans && !appConfig.isProperty1Rented) p1CurrentRow.closingBalance else 0.0
 
     val p2AutoFortnights = getElapsedFortnightsSinceStart(prop2Loan.startDateStr)
     val p2Schedule = generateAmortizationSchedule(prop2Loan, 780)
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
-    val prop2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty) p2CurrentRow.closingBalance else 0.0
+    val prop2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !appConfig.isProperty2Rented) p2CurrentRow.closingBalance else 0.0
 
     val prop1HousingCost = if (appConfig.isProperty1Rented) -appConfig.primaryRentWeekly else prop1WeeklyMortgage
     val prop1NetWeekly = prop1HousingCost + prop1Items.sumOf { it.weeklyAmount }
@@ -2242,6 +2366,8 @@ fun ExpenseTrackerApp(
     // Hoisted What-If Simulation Controls, Custom Levers & Milestone State (Empty by default so user adds what they like)
     var whatIfHorizonYears by rememberSaveable { mutableIntStateOf(15) }
     var whatIfLifestyleAdjustmentWeekly by rememberSaveable { mutableFloatStateOf(0f) }
+    var whatIfIncomeGrowthP1Weekly by rememberSaveable { mutableFloatStateOf(0f) }
+    var whatIfIncomeGrowthP2Weekly by rememberSaveable { mutableFloatStateOf(0f) }
     var whatIfRateShockProp1 by rememberSaveable { mutableFloatStateOf(0f) }
     var whatIfRateShockProp2 by rememberSaveable { mutableFloatStateOf(0f) }
     var whatIfRentalGrowthWeekly by rememberSaveable { mutableFloatStateOf(0f) }
@@ -2255,12 +2381,12 @@ fun ExpenseTrackerApp(
     }
 
     // Transparent Global AI Assistant Context Computation (Unmasked & Available across all tabs & scenarios)
-    val prop1Val = if (appConfig.showProperties) prop1EstimatedValue else 0.0
-    val prop2Val = if (appConfig.showProperties && appConfig.hasSecondProperty) prop2EstimatedValue else 0.0
+    val prop1Val = if (appConfig.showProperties && !appConfig.isProperty1Rented) prop1EstimatedValue else 0.0
+    val prop2Val = if (appConfig.showProperties && appConfig.hasSecondProperty && !appConfig.isProperty2Rented) prop2EstimatedValue else 0.0
     val superVal = if (appConfig.showSuperAndShares) superAccountsList.sumOf { it.balance } else 0.0
     val sharesVal = if (appConfig.showSuperAndShares) sharesList.sumOf { it.units * it.currentPrice } else 0.0
     val otherVal = if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
-    val offsetsVal = if (appConfig.showLoans) prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0) else 0.0
+    val offsetsVal = if (appConfig.showLoans && !appConfig.isProperty1Rented) prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0) else 0.0
 
     val exactTotalAssets = prop1Val + prop2Val + superVal + sharesVal + otherVal + offsetsVal
     val exactTotalLiabilities = prop1LiveBalance + prop2LiveBalance
@@ -2283,6 +2409,8 @@ fun ExpenseTrackerApp(
         p1Surp + p2Surp + combinedPropertyNet
     }
 
+    val totalWhatIfIncomeGrowthWeekly = whatIfIncomeGrowthP1Weekly + (if (appConfig.isCoupleMode) whatIfIncomeGrowthP2Weekly else 0f)
+
     // Unified Multi-Year What-If Projection (up to 30 years so AI can answer 1Y, 5Y, 10Y, 15Y, 20Y, 30Y questions)
     val maxProjectionHorizon = max(whatIfHorizonYears, 30)
     val fullWhatIfProj = computeWhatIfProjection(
@@ -2296,11 +2424,12 @@ fun ExpenseTrackerApp(
         prop1Loan = prop1Loan,
         prop2Loan = prop2Loan,
         hasSecondProperty = appConfig.hasSecondProperty,
-        showLoans = appConfig.showLoans,
+        showLoans = appConfig.showLoans && !appConfig.isProperty1Rented,
         lifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
-        rateShockProp1 = whatIfRateShockProp1,
-        rateShockProp2 = whatIfRateShockProp2,
-        rentalIncomeGrowthWeekly = whatIfRentalGrowthWeekly,
+        incomeGrowthWeekly = totalWhatIfIncomeGrowthWeekly,
+        rateShockProp1 = if (appConfig.isProperty1Rented) 0f else whatIfRateShockProp1,
+        rateShockProp2 = if (appConfig.isProperty1Rented) 0f else whatIfRateShockProp2,
+        rentalIncomeGrowthWeekly = if (appConfig.isProperty1Rented) -whatIfRentalGrowthWeekly else whatIfRentalGrowthWeekly,
         superBoostWeekly = whatIfSuperBoostWeekly,
         customLevers = whatIfCustomLevers,
         milestones = whatIfMilestoneList
@@ -2366,6 +2495,12 @@ fun ExpenseTrackerApp(
         append("\n\n6. WHAT-IF SCENARIO SIMULATOR (ACTIVE LEVERS, CUSTOM LEVERS, MILESTONES & FUTURE PROJECTIONS): ")
         append("Active Timeframe = $whatIfHorizonYears Years. ")
         append("Extra Weekly Savings/Spending = ${if (whatIfLifestyleAdjustmentWeekly >= 0) "+$" else "-$"}${abs(whatIfLifestyleAdjustmentWeekly)}/wk. ")
+        if (whatIfIncomeGrowthP1Weekly != 0f) {
+            append("${appConfig.person1Name} Weekly Income Growth = ${if (whatIfIncomeGrowthP1Weekly >= 0) "+$" else "-$"}${abs(whatIfIncomeGrowthP1Weekly)}/wk. ")
+        }
+        if (appConfig.isCoupleMode && whatIfIncomeGrowthP2Weekly != 0f) {
+            append("${appConfig.person2Name} Weekly Income Growth = ${if (whatIfIncomeGrowthP2Weekly >= 0) "+$" else "-$"}${abs(whatIfIncomeGrowthP2Weekly)}/wk. ")
+        }
         append("Property 1 Rate Change (${appConfig.property1Name}) = ${if (whatIfRateShockProp1 >= 0) "+" else ""}${whatIfRateShockProp1}% (Weekly repayment delta: ${formatCurrency(fullWhatIfProj.weeklyRateDeltaProp1, 2)}/wk). ")
         if (appConfig.hasSecondProperty) {
             append("Property 2 Rate Change (${appConfig.property2Name}) = ${if (whatIfRateShockProp2 >= 0) "+" else ""}${whatIfRateShockProp2}% (Weekly repayment delta: ${formatCurrency(fullWhatIfProj.weeklyRateDeltaProp2, 2)}/wk). ")
@@ -2668,6 +2803,8 @@ fun ExpenseTrackerApp(
                 "UPDATE_WHAT_IF" -> {
                     params["horizonyears"]?.toIntOrNull()?.let { whatIfHorizonYears = it.coerceIn(1, 40) }
                     params["savingsweekly"]?.replace("$", "")?.toFloatOrNull()?.let { whatIfLifestyleAdjustmentWeekly = it.coerceIn(-2000f, 5000f) }
+                    params["incomegrowth1weekly"]?.replace("$", "")?.toFloatOrNull()?.let { whatIfIncomeGrowthP1Weekly = it.coerceIn(-2000f, 5000f) }
+                    params["incomegrowth2weekly"]?.replace("$", "")?.toFloatOrNull()?.let { whatIfIncomeGrowthP2Weekly = it.coerceIn(-2000f, 5000f) }
                     params["ratechangeprop1"]?.replace("%", "")?.toFloatOrNull()?.let { whatIfRateShockProp1 = it.coerceIn(-5f, 8f) }
                     params["ratechangeprop2"]?.replace("%", "")?.toFloatOrNull()?.let { whatIfRateShockProp2 = it.coerceIn(-5f, 8f) }
                     params["superboostweekly"]?.replace("$", "")?.toFloatOrNull()?.let { whatIfSuperBoostWeekly = it.coerceIn(0f, 3000f) }
@@ -2756,10 +2893,15 @@ fun ExpenseTrackerApp(
     }
 
     val headerSubtitle = remember(appConfig) {
-        if (appConfig.isCoupleMode) {
-            "EXPNZ • ${appConfig.person1Name.uppercase()} & ${appConfig.person2Name.uppercase()}"
+        val suffix = if (appConfig.isCoupleMode) {
+            " • ${appConfig.person1Name.uppercase()} & ${appConfig.person2Name.uppercase()}"
         } else {
-            "EXPNZ • ${appConfig.person1Name.uppercase()}"
+            " • ${appConfig.person1Name.uppercase()}"
+        }
+        buildAnnotatedString {
+            withStyle(SpanStyle(fontWeight = FontWeight.ExtraBold)) { append("COIN") }
+            withStyle(SpanStyle(fontWeight = FontWeight.Normal)) { append("LENS") }
+            withStyle(SpanStyle(fontWeight = FontWeight.ExtraBold)) { append(suffix) }
         }
     }
 
@@ -2804,7 +2946,6 @@ fun ExpenseTrackerApp(
                                 text = headerSubtitle,
                                 color = BrandCoralPink,
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.ExtraBold,
                                 letterSpacing = 1.2.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -3042,6 +3183,7 @@ fun ExpenseTrackerApp(
                                 prop2MarketValue = prop2EstimatedValue,
                                 prop1LoanBalance = prop1LiveBalance,
                                 prop2LoanBalance = prop2LiveBalance,
+                                onUpdatePropertyValuations = { p1Val, p2Val -> savePropertyValuations(p1Val, p2Val) },
                                 onUpdateAppConfig = { saveAppConfig(it) }
                             )
                             AppSection.SUPER_SHARES -> SuperAndSharesScreen(
@@ -3141,6 +3283,10 @@ fun ExpenseTrackerApp(
                                 onHorizonYearsChange = { whatIfHorizonYears = it },
                                 lifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
                                 onLifestyleAdjustmentWeeklyChange = { whatIfLifestyleAdjustmentWeekly = it },
+                                incomeGrowthPerson1Weekly = whatIfIncomeGrowthP1Weekly,
+                                onIncomeGrowthPerson1WeeklyChange = { whatIfIncomeGrowthP1Weekly = it },
+                                incomeGrowthPerson2Weekly = whatIfIncomeGrowthP2Weekly,
+                                onIncomeGrowthPerson2WeeklyChange = { whatIfIncomeGrowthP2Weekly = it },
                                 rateShockProp1 = whatIfRateShockProp1,
                                 onRateShockProp1Change = { whatIfRateShockProp1 = it },
                                 rateShockProp2 = whatIfRateShockProp2,
@@ -3337,6 +3483,7 @@ fun ExpenseTrackerApp(
                             prop2MarketValue = prop2EstimatedValue,
                             prop1LoanBalance = prop1LiveBalance,
                             prop2LoanBalance = prop2LiveBalance,
+                            onUpdatePropertyValuations = { p1Val, p2Val -> savePropertyValuations(p1Val, p2Val) },
                             onUpdateAppConfig = { saveAppConfig(it) }
                         )
                         AppSection.SUPER_SHARES -> SuperAndSharesScreen(
@@ -3436,6 +3583,10 @@ fun ExpenseTrackerApp(
                             onHorizonYearsChange = { whatIfHorizonYears = it },
                             lifestyleAdjustmentWeekly = whatIfLifestyleAdjustmentWeekly,
                             onLifestyleAdjustmentWeeklyChange = { whatIfLifestyleAdjustmentWeekly = it },
+                            incomeGrowthPerson1Weekly = whatIfIncomeGrowthP1Weekly,
+                            onIncomeGrowthPerson1WeeklyChange = { whatIfIncomeGrowthP1Weekly = it },
+                            incomeGrowthPerson2Weekly = whatIfIncomeGrowthP2Weekly,
+                            onIncomeGrowthPerson2WeeklyChange = { whatIfIncomeGrowthP2Weekly = it },
                             rateShockProp1 = whatIfRateShockProp1,
                             onRateShockProp1Change = { whatIfRateShockProp1 = it },
                             rateShockProp2 = whatIfRateShockProp2,
@@ -3992,7 +4143,7 @@ fun OnboardingSetupScreen(
                         HorizontalDivider()
 
                         FeatureToggleRow(
-                            title = "EXPNZ AI Chatbot (Gemini)",
+                            title = "CoinBot (Gemini)",
                             subtitle = "Use the built-in AI assistant to ask financial advice and interact with your dashboard data directly",
                             icon = Icons.AutoMirrored.Filled.Chat,
                             accent = BrandCoralPink,
@@ -4286,13 +4437,13 @@ fun OnboardingSetupScreen(
                                 property2Name = property2Name.trim().ifBlank { "Investment Property" },
                                 isProperty1Rented = isProperty1Rented,
                                 isProperty2Rented = isProperty2Rented,
-                                hasSecondProperty = hasSecondProperty,
+                                hasSecondProperty = !isProperty1Rented && hasSecondProperty,
                                 showTotalWealth = finalShowWealth,
                                 showCashFlow = showCashFlow,
                                 showProperties = showProperties,
                                 showSuperAndShares = showSuperAndShares,
                                 showOtherAssets = showOtherAssets,
-                                showLoans = showLoans,
+                                showLoans = !isProperty1Rented && showLoans,
                                 useExpnzAi = useExpnzAi
                             )
                             val supers = customSuperAccounts.toList()
@@ -4308,10 +4459,10 @@ fun OnboardingSetupScreen(
                                 finalConfig,
                                 person1IncomeStr.toDoubleOrNull() ?: 1200.0,
                                 person2IncomeStr.toDoubleOrNull() ?: 1000.0,
-                                prop1ValueStr.toDoubleOrNull() ?: 750000.0,
-                                prop1LoanBalStr.toDoubleOrNull() ?: 465000.0,
+                                if (isProperty1Rented) 0.0 else (prop1ValueStr.toDoubleOrNull() ?: 750000.0),
+                                if (isProperty1Rented) 0.0 else (prop1LoanBalStr.toDoubleOrNull() ?: 465000.0),
                                 prop1RateStr.toDoubleOrNull() ?: 6.29,
-                                prop1OffsetStr.toDoubleOrNull() ?: 45000.0,
+                                if (isProperty1Rented) 0.0 else (prop1OffsetStr.toDoubleOrNull() ?: 45000.0),
                                 prop1RentStr.toDoubleOrNull() ?: 500.0,
                                 supers,
                                 shares,
@@ -4441,10 +4592,13 @@ fun LoginScreen(
                 AppLogoIcon(size = 72.dp)
 
                 Text(
-                    text = "EXPNZ • PERSONAL WEALTH",
+                    text = buildAnnotatedString {
+                        withStyle(SpanStyle(fontWeight = FontWeight.ExtraBold)) { append("COIN") }
+                        withStyle(SpanStyle(fontWeight = FontWeight.Normal)) { append("LENS") }
+                        withStyle(SpanStyle(fontWeight = FontWeight.ExtraBold)) { append(" • PERSONAL WEALTH") }
+                    },
                     color = BrandCoralPink,
                     fontSize = 14.sp,
-                    fontWeight = FontWeight.ExtraBold,
                     letterSpacing = 1.5.sp
                 )
 
@@ -4693,7 +4847,6 @@ fun showBiometricPrompt(
 
 @Composable
 fun BiometricLockScreen(
-    appSubtitle: String,
     onUnlockClick: () -> Unit,
     onSignOutClick: () -> Unit
 ) {
@@ -4722,10 +4875,12 @@ fun BiometricLockScreen(
                 AppLogoIcon(size = 72.dp)
 
                 Text(
-                    text = appSubtitle.uppercase(),
+                    text = buildAnnotatedString {
+                        withStyle(SpanStyle(fontWeight = FontWeight.ExtraBold)) { append("COIN") }
+                        withStyle(SpanStyle(fontWeight = FontWeight.Normal)) { append("LENS") }
+                    },
                     color = BrandCoralPink,
                     fontSize = 14.sp,
-                    fontWeight = FontWeight.ExtraBold,
                     letterSpacing = 1.5.sp
                 )
 
@@ -5417,7 +5572,11 @@ fun SettingsScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        "Enter your partner's name and email below. When your partner creates their own EXPNZ account (or signs in) using this email, they will automatically connect to your shared household with full real-time read & write access.",
+                        buildAnnotatedString {
+                            append("Enter your partner's name and email below. When your partner creates their own ")
+                            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("COIN") }
+                            append("LENS account (or signs in) using this email, they will automatically connect to your shared household with full real-time read & write access.")
+                        },
                         fontSize = 12.sp,
                         color = SlateGray
                     )
@@ -5471,13 +5630,13 @@ fun SettingsScreen(
                         showInvitePartnerDialog = false
 
                         val shareText = buildString {
-                            append("Hi $cleanName! I've invited you to share our household wealth & budget tracker on EXPNZ.\n\n")
-                            append("1. Open EXPNZ and Sign Up (or Sign In) with your email: $cleanEmail\n")
+                            append("Hi $cleanName! I've invited you to share our household wealth & budget tracker on COINLENS.\n\n")
+                            append("1. Open COINLENS and Sign Up (or Sign In) with your email: $cleanEmail\n")
                             append("2. Your account will automatically sync with our shared household data (or use Invite Code: $householdInviteCode in Settings).")
                         }
                         val sendIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "Join our shared EXPNZ Household")
+                            putExtra(Intent.EXTRA_SUBJECT, "Join our shared COINLENS Household")
                             putExtra(Intent.EXTRA_TEXT, shareText)
                         }
                         context.startActivity(Intent.createChooser(sendIntent, "Send Partner Invite"))
@@ -6079,6 +6238,7 @@ fun PropertiesScreen(
     prop1LoanBalance: Double,
     prop2LoanBalance: Double,
     isWealthHidden: Boolean = false,
+    onUpdatePropertyValuations: (Double, Double) -> Unit = { _, _ -> },
     onUpdateAppConfig: (UserAppConfig) -> Unit
 ) {
     var selectedProperty by remember { mutableIntStateOf(0) }
@@ -6149,6 +6309,7 @@ fun PropertiesScreen(
 
             var showRentEditDialog by remember { mutableStateOf(false) }
             var showMgmtFeeDialog by remember { mutableStateOf(false) }
+            var showValueEditDialog by remember { mutableStateOf(false) }
 
             if (isProp1) {
                 val isRented = appConfig.isProperty1Rented
@@ -6219,6 +6380,9 @@ fun PropertiesScreen(
                                     }
                                     Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
                                 }
+                                IconButton(onClick = { showValueEditDialog = true }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit Estimated Value", modifier = Modifier.size(16.dp), tint = BrandMintGreen)
+                                }
                             }
 
                             LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
@@ -6252,6 +6416,9 @@ fun PropertiesScreen(
                                         }
                                     }
                                     Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
+                                }
+                                IconButton(onClick = { showValueEditDialog = true }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit Estimated Value", modifier = Modifier.size(16.dp), tint = BrandMintGreen)
                                 }
                             }
 
@@ -6303,6 +6470,23 @@ fun PropertiesScreen(
                         }
                     }
                 }
+            }
+
+            if (showValueEditDialog) {
+                EditSingleValueDialog(
+                    title = "Update $activePropName Value",
+                    label = "Estimated Market Value ($)",
+                    initialValue = estVal,
+                    onDismiss = { showValueEditDialog = false },
+                    onConfirm = { newVal ->
+                        if (isProp1) {
+                            onUpdatePropertyValuations(newVal, prop2MarketValue)
+                        } else {
+                            onUpdatePropertyValuations(prop1MarketValue, newVal)
+                        }
+                        showValueEditDialog = false
+                    }
+                )
             }
 
             if (showRentEditDialog) {
@@ -6439,7 +6623,7 @@ fun PropertiesScreen(
                         )
                     }
                 }
-                if (appConfig.showLoans) {
+                if (appConfig.showLoans && !(isProp1 && appConfig.isProperty1Rented) && !(!isProp1 && appConfig.isProperty2Rented)) {
                     val weeklyMort = if (selectedProperty == 0) prop1WeeklyMortgage else prop2WeeklyMortgage
                     ExpenseItemCard(
                         item = CashflowItem(
@@ -6967,6 +7151,10 @@ fun WhatIfScenarioScreen(
     onHorizonYearsChange: (Int) -> Unit = {},
     lifestyleAdjustmentWeekly: Float = 0f,
     onLifestyleAdjustmentWeeklyChange: (Float) -> Unit = {},
+    incomeGrowthPerson1Weekly: Float = 0f,
+    onIncomeGrowthPerson1WeeklyChange: (Float) -> Unit = {},
+    incomeGrowthPerson2Weekly: Float = 0f,
+    onIncomeGrowthPerson2WeeklyChange: (Float) -> Unit = {},
     rateShockProp1: Float = 0f,
     onRateShockProp1Change: (Float) -> Unit = {},
     rateShockProp2: Float = 0f,
@@ -6986,14 +7174,16 @@ fun WhatIfScenarioScreen(
 
     var activeScenarioId by rememberSaveable { mutableStateOf("status_quo") }
 
+    val isTenantMode = appConfig.isProperty1Rented
+
     // Baseline Financial Calculations (matching Total Wealth & Cash Flow tabs)
-    val totalPropertyVal = if (appConfig.showProperties) {
+    val totalPropertyVal = if (appConfig.showProperties && !isTenantMode) {
         prop1MarketValue + (if (appConfig.hasSecondProperty) prop2MarketValue else 0.0)
     } else 0.0
     val totalSuperVal = if (appConfig.showSuperAndShares) superAccountsList.sumOf { it.balance } else 0.0
     val totalSharesVal = if (appConfig.showSuperAndShares) sharesList.sumOf { it.units * it.currentPrice } else 0.0
     val totalOtherAssetsVal = if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
-    val totalOffsets = if (appConfig.showLoans) {
+    val totalOffsets = if (appConfig.showLoans && !isTenantMode) {
         prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0)
     } else 0.0
 
@@ -7002,12 +7192,12 @@ fun WhatIfScenarioScreen(
     val p1AutoFortnights = getElapsedFortnightsSinceStart(prop1Loan.startDateStr)
     val p1Schedule = remember(prop1Loan) { generateAmortizationSchedule(prop1Loan, 780) }
     val p1CurrentRow = p1Schedule.getOrNull(p1AutoFortnights.coerceIn(0, p1Schedule.size - 1)) ?: p1Schedule.first()
-    val p1LiveBalance = if (appConfig.showLoans) p1CurrentRow.closingBalance else 0.0
+    val p1LiveBalance = if (appConfig.showLoans && !isTenantMode) p1CurrentRow.closingBalance else 0.0
 
     val p2AutoFortnights = getElapsedFortnightsSinceStart(prop2Loan.startDateStr)
     val p2Schedule = remember(prop2Loan) { generateAmortizationSchedule(prop2Loan, 780) }
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
-    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty) p2CurrentRow.closingBalance else 0.0
+    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !isTenantMode) p2CurrentRow.closingBalance else 0.0
 
     val totalLiabilities = p1LiveBalance + p2LiveBalance
     val baseNetWorth = totalAssets - totalLiabilities
@@ -7042,11 +7232,14 @@ fun WhatIfScenarioScreen(
         "${it.id}_${it.title}_${it.impactType}_${it.minValue}_${it.maxValue}_${it.stepSize}_${it.currentValue}_${it.isEnabled}"
     }
 
+    val effectiveIncomeGrowthWeekly = incomeGrowthPerson1Weekly + (if (appConfig.isCoupleMode) incomeGrowthPerson2Weekly else 0f)
+    val effectiveRentalCashflowDelta = if (isTenantMode) -rentalIncomeGrowthWeekly else rentalIncomeGrowthWeekly
+
     val proj = remember(
         baseNetWorth, baseSurplusWeekly, horizonYears,
         totalSharesVal, totalSuperVal, totalPropertyVal, totalOtherAssetsVal, totalOffsets, totalLiabilities,
-        appConfig.showLoans, appConfig.hasSecondProperty, prop1Loan, prop2Loan,
-        lifestyleAdjustmentWeekly, rateShockProp1, rateShockProp2, rentalIncomeGrowthWeekly, superBoostWeekly,
+        appConfig.showLoans, appConfig.hasSecondProperty, isTenantMode, prop1Loan, prop2Loan,
+        lifestyleAdjustmentWeekly, effectiveIncomeGrowthWeekly, rateShockProp1, rateShockProp2, effectiveRentalCashflowDelta, superBoostWeekly,
         milestoneFingerprint, customLeversFingerprint
     ) {
         computeWhatIfProjection(
@@ -7060,11 +7253,12 @@ fun WhatIfScenarioScreen(
             prop1Loan = prop1Loan,
             prop2Loan = prop2Loan,
             hasSecondProperty = appConfig.hasSecondProperty,
-            showLoans = appConfig.showLoans,
+            showLoans = appConfig.showLoans && !isTenantMode,
             lifestyleAdjustmentWeekly = lifestyleAdjustmentWeekly,
-            rateShockProp1 = rateShockProp1,
-            rateShockProp2 = rateShockProp2,
-            rentalIncomeGrowthWeekly = rentalIncomeGrowthWeekly,
+            incomeGrowthWeekly = effectiveIncomeGrowthWeekly,
+            rateShockProp1 = if (isTenantMode) 0f else rateShockProp1,
+            rateShockProp2 = if (isTenantMode) 0f else rateShockProp2,
+            rentalIncomeGrowthWeekly = effectiveRentalCashflowDelta,
             superBoostWeekly = superBoostWeekly,
             customLevers = customLevers.toList(),
             milestones = milestoneList.toList()
@@ -7084,12 +7278,14 @@ fun WhatIfScenarioScreen(
 
     val year1MilestoneWeekly = milestoneList.filter { it.isEnabled && it.startYear <= 1 }.sumOf { it.weeklyCashflowImpact }
     val weeklyCashflowDeltaNow =
-        lifestyleAdjustmentWeekly.toDouble() - totalWeeklyRateShockCost + rentalIncomeGrowthWeekly.toDouble() + proj.customWeeklyCashflowTotal + year1MilestoneWeekly
+        lifestyleAdjustmentWeekly.toDouble() + effectiveIncomeGrowthWeekly.toDouble() - totalWeeklyRateShockCost + effectiveRentalCashflowDelta.toDouble() + proj.customWeeklyCashflowTotal + year1MilestoneWeekly
     val simulatedWeeklySurplusNow = baseSurplusWeekly + weeklyCashflowDeltaNow
 
     val hasAnyChanges = lifestyleAdjustmentWeekly != 0f ||
-            rateShockProp1 != 0f ||
-            rateShockProp2 != 0f ||
+            incomeGrowthPerson1Weekly != 0f ||
+            (appConfig.isCoupleMode && incomeGrowthPerson2Weekly != 0f) ||
+            (!isTenantMode && rateShockProp1 != 0f) ||
+            (!isTenantMode && rateShockProp2 != 0f) ||
             rentalIncomeGrowthWeekly != 0f ||
             superBoostWeekly != 0f ||
             customLevers.any { it.isEnabled && abs(it.currentValue) > 0.001f } ||
@@ -7098,6 +7294,8 @@ fun WhatIfScenarioScreen(
     fun resetAllToStatusQuo() {
         activeScenarioId = "status_quo"
         onLifestyleAdjustmentWeeklyChange(0f)
+        onIncomeGrowthPerson1WeeklyChange(0f)
+        onIncomeGrowthPerson2WeeklyChange(0f)
         onRateShockProp1Change(0f)
         onRateShockProp2Change(0f)
         onRentalIncomeGrowthWeeklyChange(0f)
@@ -7108,155 +7306,334 @@ fun WhatIfScenarioScreen(
         milestoneList.clear()
     }
 
-    // Australian Square Tiles Scenario Explorer
-    val scenarioTiles = listOf(
-        AussieScenarioTile(
-            id = "status_quo",
-            title = "Status Quo",
-            badge = "Baseline",
-            icon = Icons.Default.Refresh,
-            color = SlateGray,
-            onApply = { resetAllToStatusQuo() }
-        ),
-        AussieScenarioTile(
-            id = "rba_cut",
-            title = "RBA Rate Cut",
-            badge = "-0.50% (2 Cuts)",
-            icon = Icons.AutoMirrored.Filled.TrendingDown,
-            color = BrandMintGreen,
-            onApply = {
-                activeScenarioId = "rba_cut"
-                onLifestyleAdjustmentWeeklyChange(0f)
-                onRateShockProp1Change(-0.5f)
-                onRateShockProp2Change(if (appConfig.hasSecondProperty) -0.5f else 0f)
-                onRentalIncomeGrowthWeeklyChange(0f)
-                onSuperBoostWeeklyChange(0f)
-                milestoneList.clear()
-            }
-        ),
-        AussieScenarioTile(
-            id = "offset_smash",
-            title = "Offset Smash",
-            badge = "+$200/wk Saved",
-            icon = Icons.Default.Savings,
-            color = BrandSkyBlue,
-            onApply = {
-                activeScenarioId = "offset_smash"
-                onLifestyleAdjustmentWeeklyChange(200f)
-                onRateShockProp1Change(0f)
-                onRateShockProp2Change(0f)
-                onRentalIncomeGrowthWeeklyChange(0f)
-                onSuperBoostWeeklyChange(0f)
-                milestoneList.clear()
-            }
-        ),
-        AussieScenarioTile(
-            id = "super_boost",
-            title = "Super Boost",
-            badge = "+$150/wk Sacr.",
-            icon = Icons.Default.AccountBalance,
-            color = BrandPurple,
-            onApply = {
-                activeScenarioId = "super_boost"
-                onLifestyleAdjustmentWeeklyChange(0f)
-                onRateShockProp1Change(0f)
-                onRateShockProp2Change(0f)
-                onRentalIncomeGrowthWeeklyChange(0f)
-                onSuperBoostWeeklyChange(150f)
-                milestoneList.clear()
-            }
-        ),
-        AussieScenarioTile(
-            id = "rba_hike",
-            title = "RBA Rate Stress",
-            badge = "+1.00% (4 Hikes)",
-            icon = Icons.AutoMirrored.Filled.TrendingUp,
-            color = BrandWarmAmber,
-            onApply = {
-                activeScenarioId = "rba_hike"
-                onLifestyleAdjustmentWeeklyChange(0f)
-                onRateShockProp1Change(1.0f)
-                onRateShockProp2Change(if (appConfig.hasSecondProperty) 1.0f else 0f)
-                onRentalIncomeGrowthWeeklyChange(0f)
-                onSuperBoostWeeklyChange(0f)
-                milestoneList.clear()
-            }
-        ),
-        AussieScenarioTile(
-            id = "inv_property",
-            title = "Buy Inv. Property",
-            badge = "$750k in Yr 2",
-            icon = Icons.Default.HomeWork,
-            color = BrandCoralPink,
-            onApply = {
-                activeScenarioId = "inv_property"
-                onLifestyleAdjustmentWeeklyChange(0f)
-                onRateShockProp1Change(0f)
-                onRateShockProp2Change(0f)
-                onRentalIncomeGrowthWeeklyChange(0f)
-                onSuperBoostWeeklyChange(0f)
-                milestoneList.clear()
-                milestoneList.add(
-                    LifeMilestoneBlock(
-                        id = "m_au_prop",
-                        title = "Buy Aussie Investment Property ($750k)",
-                        category = MilestoneCategory.PROPERTY,
-                        startYear = 2,
-                        durationYears = 25,
-                        weeklyCashflowImpact = -150.0,
-                        assetImpact = 750000.0,
-                        liabilityImpact = 600000.0,
-                        isEnabled = true
+    // Australian Square Tiles Scenario Explorer (Tailored for Aussie Renters vs Mortgage Holders)
+    val scenarioTiles = if (isTenantMode) {
+        listOf(
+            AussieScenarioTile(
+                id = "status_quo",
+                title = "Status Quo",
+                badge = "Baseline",
+                icon = Icons.Default.Refresh,
+                color = SlateGray,
+                onApply = { resetAllToStatusQuo() }
+            ),
+            AussieScenarioTile(
+                id = "rent_hike",
+                title = "Rent Hike",
+                badge = "+$60/wk Renewal",
+                icon = Icons.AutoMirrored.Filled.TrendingUp,
+                color = BrandCoralPink,
+                onApply = {
+                    activeScenarioId = "rent_hike"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(60f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "cheaper_rental",
+                title = "Cheaper Rental",
+                badge = "Save $100/wk",
+                icon = Icons.AutoMirrored.Filled.TrendingDown,
+                color = BrandMintGreen,
+                onApply = {
+                    activeScenarioId = "cheaper_rental"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(-100f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "house_deposit",
+                title = "Deposit Sprint",
+                badge = "+$250/wk Saved",
+                icon = Icons.Default.Savings,
+                color = BrandSkyBlue,
+                onApply = {
+                    activeScenarioId = "house_deposit"
+                    onLifestyleAdjustmentWeeklyChange(250f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "buy_first_home",
+                title = "Buy First Home",
+                badge = "$650k in Yr 3",
+                icon = Icons.Default.Home,
+                color = BrandWarmAmber,
+                onApply = {
+                    activeScenarioId = "buy_first_home"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                    milestoneList.add(
+                        LifeMilestoneBlock(
+                            id = "m_au_first_home",
+                            title = "Buy First Home ($650k)",
+                            category = MilestoneCategory.PROPERTY,
+                            startYear = 3,
+                            durationYears = 25,
+                            weeklyCashflowImpact = -200.0,
+                            assetImpact = 650000.0,
+                            liabilityImpact = 520000.0,
+                            isEnabled = true
+                        )
                     )
-                )
-            }
-        ),
-        AussieScenarioTile(
-            id = "etf_dca",
-            title = "ASX ETF Plan",
-            badge = "+$150/wk VAS/VGS",
-            icon = Icons.AutoMirrored.Filled.ShowChart,
-            color = BrandMintGreen,
-            onApply = {
-                activeScenarioId = "etf_dca"
-                onLifestyleAdjustmentWeeklyChange(150f)
-                onRateShockProp1Change(0f)
-                onRateShockProp2Change(0f)
-                onRentalIncomeGrowthWeeklyChange(0f)
-                onSuperBoostWeeklyChange(50f)
-                milestoneList.clear()
-            }
-        ),
-        AussieScenarioTile(
-            id = "parental_leave",
-            title = "Parental Leave",
-            badge = "1 Yr Career Break",
-            icon = Icons.Default.ChildCare,
-            color = BrandCoralLight,
-            onApply = {
-                activeScenarioId = "parental_leave"
-                onLifestyleAdjustmentWeeklyChange(0f)
-                onRateShockProp1Change(0f)
-                onRateShockProp2Change(0f)
-                onRentalIncomeGrowthWeeklyChange(0f)
-                onSuperBoostWeeklyChange(0f)
-                milestoneList.clear()
-                milestoneList.add(
-                    LifeMilestoneBlock(
-                        id = "m_au_parental",
-                        title = "Parental Leave / 1 Yr Reduced Income",
-                        category = MilestoneCategory.CAREER,
-                        startYear = 2,
-                        durationYears = 1,
-                        weeklyCashflowImpact = -650.0,
-                        assetImpact = 0.0,
-                        liabilityImpact = 0.0,
-                        isEnabled = true
+                }
+            ),
+            AussieScenarioTile(
+                id = "super_boost",
+                title = "Super / FHSS",
+                badge = "+$150/wk Sacr.",
+                icon = Icons.Default.AccountBalance,
+                color = BrandPurple,
+                onApply = {
+                    activeScenarioId = "super_boost"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(150f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "etf_dca",
+                title = "ASX ETF Plan",
+                badge = "+$150/wk VAS/VGS",
+                icon = Icons.AutoMirrored.Filled.ShowChart,
+                color = BrandMintGreen,
+                onApply = {
+                    activeScenarioId = "etf_dca"
+                    onLifestyleAdjustmentWeeklyChange(150f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(50f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "parental_leave",
+                title = "Parental Leave",
+                badge = "1 Yr Career Break",
+                icon = Icons.Default.ChildCare,
+                color = BrandCoralLight,
+                onApply = {
+                    activeScenarioId = "parental_leave"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                    milestoneList.add(
+                        LifeMilestoneBlock(
+                            id = "m_au_parental",
+                            title = "Parental Leave / 1 Yr Reduced Income",
+                            category = MilestoneCategory.CAREER,
+                            startYear = 2,
+                            durationYears = 1,
+                            weeklyCashflowImpact = -650.0,
+                            assetImpact = 0.0,
+                            liabilityImpact = 0.0,
+                            isEnabled = true
+                        )
                     )
-                )
-            }
+                }
+            )
         )
-    )
+    } else {
+        listOf(
+            AussieScenarioTile(
+                id = "status_quo",
+                title = "Status Quo",
+                badge = "Baseline",
+                icon = Icons.Default.Refresh,
+                color = SlateGray,
+                onApply = { resetAllToStatusQuo() }
+            ),
+            AussieScenarioTile(
+                id = "rba_cut",
+                title = "RBA Rate Cut",
+                badge = "-0.50% (2 Cuts)",
+                icon = Icons.AutoMirrored.Filled.TrendingDown,
+                color = BrandMintGreen,
+                onApply = {
+                    activeScenarioId = "rba_cut"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(-0.5f)
+                    onRateShockProp2Change(if (appConfig.hasSecondProperty) -0.5f else 0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "offset_smash",
+                title = "Offset Smash",
+                badge = "+$200/wk Saved",
+                icon = Icons.Default.Savings,
+                color = BrandSkyBlue,
+                onApply = {
+                    activeScenarioId = "offset_smash"
+                    onLifestyleAdjustmentWeeklyChange(200f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "super_boost",
+                title = "Super Boost",
+                badge = "+$150/wk Sacr.",
+                icon = Icons.Default.AccountBalance,
+                color = BrandPurple,
+                onApply = {
+                    activeScenarioId = "super_boost"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(150f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "rba_hike",
+                title = "RBA Rate Stress",
+                badge = "+1.00% (4 Hikes)",
+                icon = Icons.AutoMirrored.Filled.TrendingUp,
+                color = BrandWarmAmber,
+                onApply = {
+                    activeScenarioId = "rba_hike"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(1.0f)
+                    onRateShockProp2Change(if (appConfig.hasSecondProperty) 1.0f else 0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "inv_property",
+                title = "Buy Inv. Property",
+                badge = "$750k in Yr 2",
+                icon = Icons.Default.HomeWork,
+                color = BrandCoralPink,
+                onApply = {
+                    activeScenarioId = "inv_property"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                    milestoneList.add(
+                        LifeMilestoneBlock(
+                            id = "m_au_prop",
+                            title = "Buy Aussie Investment Property ($750k)",
+                            category = MilestoneCategory.PROPERTY,
+                            startYear = 2,
+                            durationYears = 25,
+                            weeklyCashflowImpact = -150.0,
+                            assetImpact = 750000.0,
+                            liabilityImpact = 600000.0,
+                            isEnabled = true
+                        )
+                    )
+                }
+            ),
+            AussieScenarioTile(
+                id = "etf_dca",
+                title = "ASX ETF Plan",
+                badge = "+$150/wk VAS/VGS",
+                icon = Icons.AutoMirrored.Filled.ShowChart,
+                color = BrandMintGreen,
+                onApply = {
+                    activeScenarioId = "etf_dca"
+                    onLifestyleAdjustmentWeeklyChange(150f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(50f)
+                    milestoneList.clear()
+                }
+            ),
+            AussieScenarioTile(
+                id = "parental_leave",
+                title = "Parental Leave",
+                badge = "1 Yr Career Break",
+                icon = Icons.Default.ChildCare,
+                color = BrandCoralLight,
+                onApply = {
+                    activeScenarioId = "parental_leave"
+                    onLifestyleAdjustmentWeeklyChange(0f)
+                    onIncomeGrowthPerson1WeeklyChange(0f)
+                    onIncomeGrowthPerson2WeeklyChange(0f)
+                    onRateShockProp1Change(0f)
+                    onRateShockProp2Change(0f)
+                    onRentalIncomeGrowthWeeklyChange(0f)
+                    onSuperBoostWeeklyChange(0f)
+                    milestoneList.clear()
+                    milestoneList.add(
+                        LifeMilestoneBlock(
+                            id = "m_au_parental",
+                            title = "Parental Leave / 1 Yr Reduced Income",
+                            category = MilestoneCategory.CAREER,
+                            startYear = 2,
+                            durationYears = 1,
+                            weeklyCashflowImpact = -650.0,
+                            assetImpact = 0.0,
+                            liabilityImpact = 0.0,
+                            isEnabled = true
+                        )
+                    )
+                }
+            )
+        )
+    }
 
     val quickMilestoneTemplates = listOf(
         AussieMilestoneTemplate("🏡 Investment Property", "Buy Investment Property ($750k)", MilestoneCategory.PROPERTY, 2, 25, -150.0, 750000.0, 600000.0),
@@ -7585,9 +7962,11 @@ fun WhatIfScenarioScreen(
                         }
                     }
 
-                    // LEVER 1: EXTRA WEEKLY OFFSET / SAVINGS
+                    var leverIdx = 1
+
+                    // LEVER 1: EXTRA WEEKLY SAVINGS / OFFSET
                     WhatIfInteractiveLeverCard(
-                        title = "1. Extra Weekly Offset / Savings",
+                        title = if (isTenantMode) "${leverIdx++}. Extra Weekly Savings / Investments" else "${leverIdx++}. Extra Weekly Offset / Savings",
                         subtitle = if (lifestyleAdjustmentWeekly == 0f) "Slide right to save more, left to spend more, or type any $/wk"
                         else "${if (lifestyleAdjustmentWeekly > 0) "+" else ""}${maskVal(lifestyleAdjustmentWeekly * 52.0, 0)} per year",
                         value = lifestyleAdjustmentWeekly,
@@ -7605,92 +7984,190 @@ fun WhatIfScenarioScreen(
 
                     HorizontalDivider()
 
-                    // LEVER 2: PROPERTY 1 INTEREST RATE CHANGE
+                    // INCOME GROWTH LEVER (MEMBER 1 — ALWAYS SHOWN FOR MORTGAGE HOLDER & TENANT)
+                    val simIncomeP1 = (person1Income + incomeGrowthPerson1Weekly).coerceAtLeast(0.0)
                     WhatIfInteractiveLeverCard(
-                        title = "2. ${appConfig.property1Name} Interest Rate Δ",
-                        subtitle = when {
-                            abs(weeklyMortgageDelta1) < 0.5 -> "${prop1Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate1)}% p.a."
-                            weeklyMortgageDelta1 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta1), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
-                            else -> "Costs -${maskVal(weeklyMortgageDelta1, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
-                        },
-                        value = rateShockProp1,
-                        valueRange = -3.0f..4.0f,
-                        stepSize = 0.25f,
-                        isPercentage = true,
-                        unitSuffix = "%",
-                        accentColor = if (rateShockProp1 <= 0f) BrandMintGreen else BrandCoralPink,
-                        presets = listOf(-1.0f to "-1.0%", -0.5f to "-0.5%", 0f to "0.0%", 0.5f to "+0.5%", 1.0f to "+1.0%"),
-                        onValueChange = { newVal ->
-                            activeScenarioId = "custom"
-                            onRateShockProp1Change(newVal)
-                        }
-                    )
-
-                    HorizontalDivider()
-
-                    // LEVER 3: PROPERTY 2 INTEREST RATE CHANGE (DEDICATED LEVER PER PROPERTY)
-                    WhatIfInteractiveLeverCard(
-                        title = "3. ${if (appConfig.hasSecondProperty) appConfig.property2Name else "Property 2"} Interest Rate Δ",
-                        subtitle = if (!appConfig.hasSecondProperty) {
-                            "Enable 2nd property in Settings or test hypothetical 2nd property rate changes"
+                        title = if (appConfig.isCoupleMode) {
+                            "${leverIdx++}. ${appConfig.person1Name} Weekly Income Growth"
                         } else {
-                            when {
-                                abs(weeklyMortgageDelta2) < 0.5 -> "${prop2Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate2)}% p.a."
-                                weeklyMortgageDelta2 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta2), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
-                                else -> "Costs -${maskVal(weeklyMortgageDelta2, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
-                            }
+                            "${leverIdx++}. Weekly Income Growth (${appConfig.person1Name})"
                         },
-                        value = rateShockProp2,
-                        valueRange = -3.0f..4.0f,
-                        stepSize = 0.25f,
-                        isPercentage = true,
-                        unitSuffix = "%",
-                        accentColor = if (rateShockProp2 <= 0f) BrandMintGreen else BrandWarmAmber,
-                        presets = listOf(-1.0f to "-1.0%", -0.5f to "-0.5%", 0f to "0.0%", 0.5f to "+0.5%", 1.0f to "+1.0%"),
-                        onValueChange = { newVal ->
-                            activeScenarioId = "custom"
-                            onRateShockProp2Change(newVal)
-                        }
-                    )
-
-                    HorizontalDivider()
-
-                    // LEVER 4: SUPERANNUATION SALARY SACRIFICE BOOST
-                    WhatIfInteractiveLeverCard(
-                        title = "4. Extra Super Salary Sacrifice",
-                        subtitle = if (superBoostWeekly == 0f) "Concessional Super contributions compounding at 8% p.a."
-                        else "+${maskVal(superBoostWeekly * 52.0, 0)}/yr boosted into Super",
-                        value = superBoostWeekly,
-                        valueRange = 0f..600f,
+                        subtitle = when {
+                            abs(incomeGrowthPerson1Weekly) < 0.5f -> "Current Income: ${maskVal(person1Income, 0)}/wk (Slide right to simulate a pay rise or income growth)"
+                            incomeGrowthPerson1Weekly > 0f -> "+${maskVal(incomeGrowthPerson1Weekly.toDouble(), 0)}/wk (+${maskVal(incomeGrowthPerson1Weekly * 52.0, 0)}/yr • New Income: ${maskVal(simIncomeP1, 0)}/wk)"
+                            else -> "-${maskVal(abs(incomeGrowthPerson1Weekly.toDouble()), 0)}/wk (-${maskVal(abs(incomeGrowthPerson1Weekly) * 52.0, 0)}/yr • New Income: ${maskVal(simIncomeP1, 0)}/wk)"
+                        },
+                        value = incomeGrowthPerson1Weekly,
+                        valueRange = -500f..1500f,
                         stepSize = 25f,
                         isPercentage = false,
                         unitSuffix = "/wk",
-                        accentColor = BrandSkyBlue,
-                        presets = listOf(0f to "$0", 50f to "+$50", 100f to "+$100", 150f to "+$150", 250f to "+$250"),
+                        accentColor = if (incomeGrowthPerson1Weekly >= 0f) BrandMintGreen else BrandCoralPink,
+                        presets = listOf(0f to "$0", 50f to "+$50", 100f to "+$100", 250f to "+$250", 500f to "+$500"),
                         onValueChange = { newVal ->
                             activeScenarioId = "custom"
-                            onSuperBoostWeeklyChange(newVal.coerceAtLeast(0f))
+                            onIncomeGrowthPerson1WeeklyChange(newVal)
                         }
                     )
+
+                    // INCOME GROWTH LEVER (MEMBER 2 — SHOWN IN COUPLE MODE FOR MORTGAGE HOLDER & TENANT)
+                    if (appConfig.isCoupleMode) {
+                        HorizontalDivider()
+
+                        val simIncomeP2 = (person2Income + incomeGrowthPerson2Weekly).coerceAtLeast(0.0)
+                        WhatIfInteractiveLeverCard(
+                            title = "${leverIdx++}. ${appConfig.person2Name} Weekly Income Growth",
+                            subtitle = when {
+                                abs(incomeGrowthPerson2Weekly) < 0.5f -> "Current Income: ${maskVal(person2Income, 0)}/wk (Slide right to simulate a pay rise or income growth)"
+                                incomeGrowthPerson2Weekly > 0f -> "+${maskVal(incomeGrowthPerson2Weekly.toDouble(), 0)}/wk (+${maskVal(incomeGrowthPerson2Weekly * 52.0, 0)}/yr • New Income: ${maskVal(simIncomeP2, 0)}/wk)"
+                                else -> "-${maskVal(abs(incomeGrowthPerson2Weekly.toDouble()), 0)}/wk (-${maskVal(abs(incomeGrowthPerson2Weekly) * 52.0, 0)}/yr • New Income: ${maskVal(simIncomeP2, 0)}/wk)"
+                            },
+                            value = incomeGrowthPerson2Weekly,
+                            valueRange = -500f..1500f,
+                            stepSize = 25f,
+                            isPercentage = false,
+                            unitSuffix = "/wk",
+                            accentColor = if (incomeGrowthPerson2Weekly >= 0f) BrandMintGreen else BrandCoralPink,
+                            presets = listOf(0f to "$0", 50f to "+$50", 100f to "+$100", 250f to "+$250", 500f to "+$500"),
+                            onValueChange = { newVal ->
+                                activeScenarioId = "custom"
+                                onIncomeGrowthPerson2WeeklyChange(newVal)
+                            }
+                        )
+                    }
 
                     HorizontalDivider()
 
-                    // LEVER 5: RENTAL INCOME / PROPERTY CASHFLOW CHANGE
-                    WhatIfInteractiveLeverCard(
-                        title = "5. Weekly Rent / Property Cashflow",
-                        subtitle = "Model higher rental income (+$/wk) or higher property holding costs (-$/wk)",
-                        value = rentalIncomeGrowthWeekly,
-                        valueRange = -300f..500f,
-                        stepSize = 25f,
-                        isPercentage = false,
-                        unitSuffix = "/wk",
-                        accentColor = if (rentalIncomeGrowthWeekly >= 0f) BrandWarmAmber else BrandCoralPink,
-                        presets = listOf(-100f to "-$100", -50f to "-$50", 0f to "$0", 50f to "+$50", 150f to "+$150"),
-                        onValueChange = { newVal ->
-                            activeScenarioId = "custom"
-                            onRentalIncomeGrowthWeeklyChange(newVal)
-                        }
-                    )
+                    if (isTenantMode) {
+                        // TENANT LEVER: SIMULATE WEEKLY RENT INCREASE / CHANGE (EXPENSE)
+                        val simulatedWeeklyRent = (appConfig.primaryRentWeekly + rentalIncomeGrowthWeekly).coerceAtLeast(0.0)
+                        WhatIfInteractiveLeverCard(
+                            title = "${leverIdx++}. Weekly Rent Increase (${appConfig.property1Name})",
+                            subtitle = when {
+                                abs(rentalIncomeGrowthWeekly) < 0.5f -> "Current Rent: ${maskVal(appConfig.primaryRentWeekly, 0)}/wk (Slide right to simulate a rent increase)"
+                                rentalIncomeGrowthWeekly > 0f -> "Costs -${maskVal(rentalIncomeGrowthWeekly.toDouble(), 0)}/wk extra (-${maskVal(rentalIncomeGrowthWeekly * 52.0, 0)}/yr • New Rent: ${maskVal(simulatedWeeklyRent, 0)}/wk)"
+                                else -> "Saves +${maskVal(abs(rentalIncomeGrowthWeekly.toDouble()), 0)}/wk (+${maskVal(abs(rentalIncomeGrowthWeekly) * 52.0, 0)}/yr • New Rent: ${maskVal(simulatedWeeklyRent, 0)}/wk)"
+                            },
+                            value = rentalIncomeGrowthWeekly,
+                            valueRange = -200f..400f,
+                            stepSize = 10f,
+                            isPercentage = false,
+                            unitSuffix = "/wk",
+                            accentColor = if (rentalIncomeGrowthWeekly <= 0f) BrandMintGreen else BrandCoralPink,
+                            presets = listOf(-100f to "-$100", -50f to "-$50", 0f to "$0", 50f to "+$50", 100f to "+$100"),
+                            onValueChange = { newVal ->
+                                activeScenarioId = "custom"
+                                onRentalIncomeGrowthWeeklyChange(newVal)
+                            }
+                        )
+
+                        HorizontalDivider()
+
+                        // TENANT LEVER: SUPERANNUATION SALARY SACRIFICE BOOST
+                        WhatIfInteractiveLeverCard(
+                            title = "$leverIdx. Extra Super Salary Sacrifice",
+                            subtitle = if (superBoostWeekly == 0f) "Concessional Super / FHSS contributions compounding at 8% p.a."
+                            else "+${maskVal(superBoostWeekly * 52.0, 0)}/yr boosted into Super",
+                            value = superBoostWeekly,
+                            valueRange = 0f..600f,
+                            stepSize = 25f,
+                            isPercentage = false,
+                            unitSuffix = "/wk",
+                            accentColor = BrandSkyBlue,
+                            presets = listOf(0f to "$0", 50f to "+$50", 100f to "+$100", 150f to "+$150", 250f to "+$250"),
+                            onValueChange = { newVal ->
+                                activeScenarioId = "custom"
+                                onSuperBoostWeeklyChange(newVal.coerceAtLeast(0f))
+                            }
+                        )
+                    } else {
+                        // MORTGAGE HOLDER LEVER: PROPERTY 1 INTEREST RATE CHANGE
+                        WhatIfInteractiveLeverCard(
+                            title = "${leverIdx++}. ${appConfig.property1Name} Interest Rate Δ",
+                            subtitle = when {
+                                abs(weeklyMortgageDelta1) < 0.5 -> "${prop1Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate1)}% p.a."
+                                weeklyMortgageDelta1 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta1), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
+                                else -> "Costs -${maskVal(weeklyMortgageDelta1, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
+                            },
+                            value = rateShockProp1,
+                            valueRange = -3.0f..4.0f,
+                            stepSize = 0.25f,
+                            isPercentage = true,
+                            unitSuffix = "%",
+                            accentColor = if (rateShockProp1 <= 0f) BrandMintGreen else BrandCoralPink,
+                            presets = listOf(-1.0f to "-1.0%", -0.5f to "-0.5%", 0f to "0.0%", 0.5f to "+0.5%", 1.0f to "+1.0%"),
+                            onValueChange = { newVal ->
+                                activeScenarioId = "custom"
+                                onRateShockProp1Change(newVal)
+                            }
+                        )
+
+                        HorizontalDivider()
+
+                        // MORTGAGE HOLDER LEVER: PROPERTY 2 INTEREST RATE CHANGE (DEDICATED LEVER PER PROPERTY)
+                        WhatIfInteractiveLeverCard(
+                            title = "${leverIdx++}. ${if (appConfig.hasSecondProperty) appConfig.property2Name else "Property 2"} Interest Rate Δ",
+                            subtitle = if (!appConfig.hasSecondProperty) {
+                                "Enable 2nd property in Settings or test hypothetical 2nd property rate changes"
+                            } else {
+                                when {
+                                    abs(weeklyMortgageDelta2) < 0.5 -> "${prop2Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate2)}% p.a."
+                                    weeklyMortgageDelta2 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta2), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
+                                    else -> "Costs -${maskVal(weeklyMortgageDelta2, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
+                                }
+                            },
+                            value = rateShockProp2,
+                            valueRange = -3.0f..4.0f,
+                            stepSize = 0.25f,
+                            isPercentage = true,
+                            unitSuffix = "%",
+                            accentColor = if (rateShockProp2 <= 0f) BrandMintGreen else BrandWarmAmber,
+                            presets = listOf(-1.0f to "-1.0%", -0.5f to "-0.5%", 0f to "0.0%", 0.5f to "+0.5%", 1.0f to "+1.0%"),
+                            onValueChange = { newVal ->
+                                activeScenarioId = "custom"
+                                onRateShockProp2Change(newVal)
+                            }
+                        )
+
+                        HorizontalDivider()
+
+                        // MORTGAGE HOLDER LEVER: SUPERANNUATION SALARY SACRIFICE BOOST
+                        WhatIfInteractiveLeverCard(
+                            title = "${leverIdx++}. Extra Super Salary Sacrifice",
+                            subtitle = if (superBoostWeekly == 0f) "Concessional Super contributions compounding at 8% p.a."
+                            else "+${maskVal(superBoostWeekly * 52.0, 0)}/yr boosted into Super",
+                            value = superBoostWeekly,
+                            valueRange = 0f..600f,
+                            stepSize = 25f,
+                            isPercentage = false,
+                            unitSuffix = "/wk",
+                            accentColor = BrandSkyBlue,
+                            presets = listOf(0f to "$0", 50f to "+$50", 100f to "+$100", 150f to "+$150", 250f to "+$250"),
+                            onValueChange = { newVal ->
+                                activeScenarioId = "custom"
+                                onSuperBoostWeeklyChange(newVal.coerceAtLeast(0f))
+                            }
+                        )
+
+                        HorizontalDivider()
+
+                        // MORTGAGE HOLDER LEVER: RENTAL INCOME / PROPERTY CASHFLOW CHANGE
+                        WhatIfInteractiveLeverCard(
+                            title = "$leverIdx. Weekly Rent / Property Cashflow",
+                            subtitle = "Model higher rental income (+$/wk) or higher property holding costs (-$/wk)",
+                            value = rentalIncomeGrowthWeekly,
+                            valueRange = -300f..500f,
+                            stepSize = 25f,
+                            isPercentage = false,
+                            unitSuffix = "/wk",
+                            accentColor = if (rentalIncomeGrowthWeekly >= 0f) BrandWarmAmber else BrandCoralPink,
+                            presets = listOf(-100f to "-$100", -50f to "-$50", 0f to "$0", 50f to "+$50", 150f to "+$150"),
+                            onValueChange = { newVal ->
+                                activeScenarioId = "custom"
+                                onRentalIncomeGrowthWeeklyChange(newVal)
+                            }
+                        )
+                    }
 
                     // USER-DEFINED CUSTOM LEVERS
                     if (customLevers.isNotEmpty()) {
@@ -7946,16 +8423,24 @@ fun WhatIfScenarioScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(20.dp))
                         Column {
-                            Text("Ask EXPNZ AI About This Scenario", fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                            Text("Ask CoinBot About This Scenario", fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
                             Text("Get tailored Australian guidance on your numbers", fontSize = 11.sp, color = SlateGray)
                         }
                     }
 
-                    val samplePrompts = listOf(
-                        "Offset vs Super salary sacrifice for us?",
-                        "Can we afford a $750k investment property?",
-                        "Impact of two 0.25% RBA rate cuts?"
-                    )
+                    val samplePrompts = if (isTenantMode) {
+                        listOf(
+                            "How does a $60/wk rent increase impact us?",
+                            "When can we afford a $650k first home?",
+                            "ASX ETF investing vs Super FHSS boost?"
+                        )
+                    } else {
+                        listOf(
+                            "Offset vs Super salary sacrifice for us?",
+                            "Can we afford a $750k investment property?",
+                            "Impact of two 0.25% RBA rate cuts?"
+                        )
+                    }
                     LazyRow(
                         modifier = Modifier.lockPagerOnTouch(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -8027,6 +8512,10 @@ fun WhatIfScenarioScreen(
                                             append("What-If Plan Net Worth in ${horizonYears}Y = ${formatCurrency(pathBEndNW, 2)}. ")
                                             append("Net Wealth Impact = ${if (nwImpact >= 0) "+" else ""}${formatCurrency(nwImpact, 2)}. ")
                                             append("Extra Weekly Offset/Savings = ${formatCurrency(lifestyleAdjustmentWeekly.toDouble(), 2)}/wk. ")
+                                            append("${appConfig.person1Name} Weekly Income Growth = ${formatCurrency(incomeGrowthPerson1Weekly.toDouble(), 2)}/wk. ")
+                                            if (appConfig.isCoupleMode) {
+                                                append("${appConfig.person2Name} Weekly Income Growth = ${formatCurrency(incomeGrowthPerson2Weekly.toDouble(), 2)}/wk. ")
+                                            }
                                             append("Property 1 Rate Change = ${rateShockProp1}% (Prop 2 Rate Change = ${rateShockProp2}%, Total weekly repayment delta: ${formatCurrency(totalWeeklyRateShockCost, 2)}/wk). ")
                                             append("Extra Super Salary Sacrifice = ${formatCurrency(superBoostWeekly.toDouble(), 2)}/wk. ")
                                             append("Active Milestones: $activeMilestonesStr. ")
@@ -8970,14 +9459,14 @@ fun TotalWealthScreen(
         }
     }
 
-    val totalPropertyVal = if (appConfig.showProperties) {
+    val totalPropertyVal = if (appConfig.showProperties && !appConfig.isProperty1Rented) {
         prop1MarketValue + (if (appConfig.hasSecondProperty) prop2MarketValue else 0.0)
     } else 0.0
 
     val totalSuperVal = if (appConfig.showSuperAndShares) superAccountsList.sumOf { it.balance } else 0.0
     val totalSharesVal = if (appConfig.showSuperAndShares) sharesList.sumOf { it.units * it.currentPrice } else 0.0
     val totalOtherAssetsVal = if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
-    val totalOffsets = if (appConfig.showLoans) {
+    val totalOffsets = if (appConfig.showLoans && !appConfig.isProperty1Rented) {
         prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0)
     } else 0.0
 
@@ -8986,12 +9475,12 @@ fun TotalWealthScreen(
     val p1AutoFortnights = getElapsedFortnightsSinceStart(prop1Loan.startDateStr)
     val p1Schedule = generateAmortizationSchedule(prop1Loan, 780)
     val p1CurrentRow = p1Schedule.getOrNull(p1AutoFortnights.coerceIn(0, p1Schedule.size - 1)) ?: p1Schedule.first()
-    val p1LiveBalance = if (appConfig.showLoans) p1CurrentRow.closingBalance else 0.0
+    val p1LiveBalance = if (appConfig.showLoans && !appConfig.isProperty1Rented) p1CurrentRow.closingBalance else 0.0
 
     val p2AutoFortnights = getElapsedFortnightsSinceStart(prop2Loan.startDateStr)
     val p2Schedule = generateAmortizationSchedule(prop2Loan, 780)
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
-    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty) p2CurrentRow.closingBalance else 0.0
+    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !appConfig.isProperty1Rented) p2CurrentRow.closingBalance else 0.0
 
     val totalLiabilities = p1LiveBalance + p2LiveBalance
     val netWorth = totalAssets - totalLiabilities
@@ -10855,7 +11344,7 @@ fun FloatingAiAssistantWidget(
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to your EXPNZ AI Assistant...")
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to CoinBot...")
             }
             try {
                 speechRecognizerLauncher.launch(intent)
@@ -10997,7 +11486,7 @@ fun FloatingAiAssistantWidget(
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         Icons.Default.AutoAwesome,
-                        contentDescription = "Open EXPNZ AI Chatbot",
+                        contentDescription = "Open CoinBot",
                         tint = BrandCoralPink,
                         modifier = Modifier.size(26.dp)
                     )
@@ -11057,7 +11546,7 @@ fun FloatingAiAssistantWidget(
                             }
                             Column {
                                 Text(
-                                    "EXPNZ AI Copilot",
+                                    "CoinBot",
                                     color = Color.White,
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.ExtraBold
@@ -11314,7 +11803,7 @@ fun FloatingAiAssistantWidget(
                                                 strokeWidth = 2.dp
                                             )
                                             Text(
-                                                "EXPNZ AI is analyzing & updating...",
+                                                "CoinBot is analyzing & updating...",
                                                 color = MaterialTheme.colorScheme.onSurface,
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Medium
@@ -11522,7 +12011,7 @@ fun FloatingAiAssistantWidget(
                                             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                                                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                                                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                                                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to your EXPNZ AI Assistant...")
+                                                putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to CoinBot...")
                                             }
                                             try {
                                                 speechRecognizerLauncher.launch(intent)
