@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -69,12 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import java.net.URLEncoder
 
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
@@ -96,12 +92,19 @@ import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
@@ -131,7 +134,7 @@ val BrandCoralRed = Color(0xFFF87171)        // High-visibility Coral Red (Outfl
 val BrandSkyBlue = Color(0xFF38BDF8)         // Sky Blue Accent
 val BrandPurple = Color(0xFFC084FC)          // Soft Lavender Purple
 
-val SlateGray = Color(0xFF94A3B8)
+val SlateGray = Color(0xFFCBD5E1)
 
 // Customizable User/Partner Color Presets
 val UserColorPalette = listOf(
@@ -182,8 +185,8 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    BrandCoralPink.copy(alpha = if (isDarkMode) 0.30f else 0.24f),
-                    BrandCoralPink.copy(alpha = if (isDarkMode) 0.08f else 0.06f),
+                    BrandCoralPink.copy(alpha = if (isDarkMode) 0.24f else 0.18f),
+                    BrandCoralPink.copy(alpha = if (isDarkMode) 0.06f else 0.04f),
                     Color.Transparent
                 ),
                 center = c1,
@@ -201,8 +204,8 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    BrandMintGreen.copy(alpha = if (isDarkMode) 0.24f else 0.20f),
-                    BrandSkyBlue.copy(alpha = if (isDarkMode) 0.08f else 0.06f),
+                    BrandMintGreen.copy(alpha = if (isDarkMode) 0.18f else 0.14f),
+                    BrandSkyBlue.copy(alpha = if (isDarkMode) 0.06f else 0.04f),
                     Color.Transparent
                 ),
                 center = c2,
@@ -220,8 +223,8 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    BrandSkyBlue.copy(alpha = if (isDarkMode) 0.22f else 0.18f),
-                    BrandPurple.copy(alpha = if (isDarkMode) 0.10f else 0.07f),
+                    BrandSkyBlue.copy(alpha = if (isDarkMode) 0.16f else 0.12f),
+                    BrandPurple.copy(alpha = if (isDarkMode) 0.07f else 0.05f),
                     Color.Transparent
                 ),
                 center = c3,
@@ -239,7 +242,7 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
-                    BrandWarmAmber.copy(alpha = if (isDarkMode) 0.16f else 0.14f),
+                    BrandWarmAmber.copy(alpha = if (isDarkMode) 0.12f else 0.10f),
                     Color.Transparent
                 ),
                 center = c4,
@@ -251,79 +254,337 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
     }
 }
 
+enum class LiquidGlassRole {
+    ORB,
+    HEADER,
+    FOOTER,
+    STATIC
+}
+
+private val nextLiquidOrbId = AtomicInteger(1)
+
+@Stable
+class LiquidScrollBoundaryState {
+    var headerTopPx by mutableFloatStateOf(0f)
+    var headerBottomPx by mutableFloatStateOf(0f)
+    var headerLeftPx by mutableFloatStateOf(0f)
+    var headerWidthPx by mutableFloatStateOf(0f)
+
+    var footerTopPx by mutableFloatStateOf(Float.MAX_VALUE)
+    var footerBottomPx by mutableFloatStateOf(Float.MAX_VALUE)
+    var footerLeftPx by mutableFloatStateOf(0f)
+    var footerWidthPx by mutableFloatStateOf(0f)
+
+    private val headerContacts = mutableStateMapOf<Int, Pair<Float, Float>>()
+    private val footerContacts = mutableStateMapOf<Int, Pair<Float, Float>>()
+
+    val headerTouchIntensity: Float
+        get() = headerContacts.values.maxOfOrNull { it.first } ?: 0f
+
+    val headerTouchCenterX: Float
+        get() = headerContacts.values.maxByOrNull { it.first }?.second ?: 0f
+
+    val footerTouchIntensity: Float
+        get() = footerContacts.values.maxOfOrNull { it.first } ?: 0f
+
+    val footerTouchCenterX: Float
+        get() = footerContacts.values.maxByOrNull { it.first }?.second ?: 0f
+
+    fun updateContact(id: Int, topIntensity: Float, bottomIntensity: Float, centerX: Float) {
+        if (topIntensity > 0.015f) {
+            headerContacts[id] = topIntensity to centerX
+        } else {
+            headerContacts.remove(id)
+        }
+        if (bottomIntensity > 0.015f) {
+            footerContacts[id] = bottomIntensity to centerX
+        } else {
+            footerContacts.remove(id)
+        }
+    }
+
+    fun removeContact(id: Int) {
+        headerContacts.remove(id)
+        footerContacts.remove(id)
+    }
+}
+
+val LocalLiquidScrollBoundary = staticCompositionLocalOf { LiquidScrollBoundaryState() }
+val LocalOnHorizontalChildTouchChange = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
+
+@Composable
+fun Modifier.lockPagerOnTouch(): Modifier {
+    val onTouchChange = LocalOnHorizontalChildTouchChange.current
+    DisposableEffect(Unit) {
+        onDispose { onTouchChange(false) }
+    }
+    return this.pointerInput(onTouchChange) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            onTouchChange(true)
+            try {
+                do {
+                    val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                } while (event.changes.any { it.pressed })
+            } finally {
+                onTouchChange(false)
+            }
+        }
+    }
+}
+
+private class LiquidOrbBoundsHolder(
+    var topPx: Float = -10000f,
+    var bottomPx: Float = -10000f,
+    var lastTopQuant: Int = 0,
+    var lastBotQuant: Int = 0
+)
+
+@Composable
 fun Modifier.liquidGlass(
     shape: Shape = RoundedCornerShape(22.dp),
     tintColor: Color = BrandForestSurface,
     intensity: Float = 1f,
-    accentRimColor: Color = BrandCoralPink
-): Modifier = this
-    .clip(shape)
-    .drawWithCache {
-        val outline = shape.createOutline(size, layoutDirection, this)
-        val safeIntensity = intensity.coerceIn(0.35f, 1.5f)
-        val strokePx = 1.25.dp.toPx()
+    accentRimColor: Color = BrandCoralPink,
+    role: LiquidGlassRole = LiquidGlassRole.ORB
+): Modifier {
+    val boundaryState = LocalLiquidScrollBoundary.current
+    val orbId = remember { nextLiquidOrbId.incrementAndGet() }
+    val boundsHolder = remember { LiquidOrbBoundsHolder() }
 
-        // 1. Multi-stop diagonal refractive frost fill
-        val baseFrostBrush = Brush.linearGradient(
-            colors = listOf(
-                Color.White.copy(alpha = (0.22f * safeIntensity).coerceIn(0f, 0.55f)),
-                tintColor.copy(alpha = (0.58f * safeIntensity).coerceIn(0f, 0.85f)),
-                tintColor.copy(alpha = (0.44f * safeIntensity).coerceIn(0f, 0.78f)),
-                Color.White.copy(alpha = (0.10f * safeIntensity).coerceIn(0f, 0.35f))
-            ),
-            start = Offset.Zero,
-            end = Offset(size.width, size.height)
-        )
-
-        // 2. Top curved liquid meniscus highlight (Apple iOS 26 lens curvature)
-        val meniscusBrush = Brush.verticalGradient(
-            colors = listOf(
-                Color.White.copy(alpha = (0.34f * safeIntensity).coerceIn(0f, 0.65f)),
-                Color.White.copy(alpha = (0.08f * safeIntensity).coerceIn(0f, 0.25f)),
-                Color.Transparent
-            ),
-            startY = 0f,
-            endY = (size.height * 0.42f).coerceAtLeast(1f)
-        )
-
-        // 3. Subtle diagonal specular sheen across glass face
-        val sheenBrush = Brush.linearGradient(
-            colors = listOf(
-                Color.Transparent,
-                Color.White.copy(alpha = (0.07f * safeIntensity).coerceIn(0f, 0.22f)),
-                Color.Transparent
-            ),
-            start = Offset(size.width * 0.15f, 0f),
-            end = Offset(size.width * 0.85f, size.height)
-        )
-
-        // 4. Anisotropic 3D specular rim (bright pearl top-left -> soft mid -> luminous accent bottom-right)
-        val rimBrush = Brush.linearGradient(
-            colors = listOf(
-                Color.White.copy(alpha = (0.68f * safeIntensity).coerceIn(0f, 0.92f)),
-                Color.White.copy(alpha = (0.16f * safeIntensity).coerceIn(0f, 0.45f)),
-                accentRimColor.copy(alpha = (0.48f * safeIntensity).coerceIn(0f, 0.85f)),
-                Color.White.copy(alpha = (0.38f * safeIntensity).coerceIn(0f, 0.75f))
-            ),
-            start = Offset.Zero,
-            end = Offset(size.width, size.height)
-        )
-
-        onDrawWithContent {
-            drawOutline(outline = outline, brush = baseFrostBrush)
-            drawOutline(outline = outline, brush = meniscusBrush)
-            drawOutline(outline = outline, brush = sheenBrush)
-            drawContent()
-            drawOutline(
-                outline = outline,
-                brush = rimBrush,
-                style = Stroke(width = strokePx)
-            )
+    if (role == LiquidGlassRole.ORB) {
+        DisposableEffect(orbId) {
+            onDispose { boundaryState.removeContact(orbId) }
         }
     }
 
-// Global package-level Liquid Glass Card & AlertDialog wrappers
-// Automatically upgrades every Card and AlertDialog across all tabs in the app!
+    val edgeZonePx = with(LocalDensity.current) { 20.dp.toPx() }.coerceAtLeast(16f)
+
+    return this
+        .onGloballyPositioned { coords ->
+            if (!coords.isAttached) return@onGloballyPositioned
+            val b = coords.boundsInRoot()
+            when (role) {
+                LiquidGlassRole.HEADER -> {
+                    if (abs(boundaryState.headerTopPx - b.top) > 0.5f) boundaryState.headerTopPx = b.top
+                    if (abs(boundaryState.headerBottomPx - b.bottom) > 0.5f) boundaryState.headerBottomPx = b.bottom
+                    if (abs(boundaryState.headerLeftPx - b.left) > 0.5f) boundaryState.headerLeftPx = b.left
+                    if (abs(boundaryState.headerWidthPx - b.width) > 0.5f) boundaryState.headerWidthPx = b.width
+                }
+                LiquidGlassRole.FOOTER -> {
+                    if (abs(boundaryState.footerTopPx - b.top) > 0.5f) boundaryState.footerTopPx = b.top
+                    if (abs(boundaryState.footerBottomPx - b.bottom) > 0.5f) boundaryState.footerBottomPx = b.bottom
+                    if (abs(boundaryState.footerLeftPx - b.left) > 0.5f) boundaryState.footerLeftPx = b.left
+                    if (abs(boundaryState.footerWidthPx - b.width) > 0.5f) boundaryState.footerWidthPx = b.width
+                }
+                LiquidGlassRole.ORB -> {
+                    boundsHolder.topPx = b.top
+                    boundsHolder.bottomPx = b.bottom
+                    val hB = boundaryState.headerBottomPx
+                    val fT = boundaryState.footerTopPx
+                    // Only trigger subtle edge refraction when the orb's actual top/bottom edge crosses the header/footer
+                    val topC = if (hB > 0f && b.height > 0f) {
+                        val dist = abs(b.top - hB)
+                        if (dist < edgeZonePx) {
+                            val t = 1f - (dist / edgeZonePx)
+                            (t * t).coerceIn(0f, 1f)
+                        } else 0f
+                    } else 0f
+                    val botC = if (fT < Float.MAX_VALUE && b.height > 0f) {
+                        val dist = abs(b.bottom - fT)
+                        if (dist < edgeZonePx) {
+                            val t = 1f - (dist / edgeZonePx)
+                            (t * t).coerceIn(0f, 1f)
+                        } else 0f
+                    } else 0f
+                    val topQ = (topC * 12f).roundToInt()
+                    val botQ = (botC * 12f).roundToInt()
+                    if (topQ != boundsHolder.lastTopQuant || botQ != boundsHolder.lastBotQuant) {
+                        boundsHolder.lastTopQuant = topQ
+                        boundsHolder.lastBotQuant = botQ
+                        boundaryState.updateContact(orbId, topC, botC, b.center.x)
+                    }
+                }
+                LiquidGlassRole.STATIC -> Unit
+            }
+        }
+        .clip(shape)
+        .drawWithCache {
+            val outline = shape.createOutline(size, layoutDirection, this)
+            val safeIntensity = intensity.coerceIn(0.65f, 1.5f)
+            val strokePx = 1.35.dp.toPx()
+
+            val solidTint = tintColor.copy(alpha = 1f)
+
+            val baseFrostBrush = Brush.linearGradient(
+                colors = listOf(
+                    solidTint.copy(alpha = (0.86f * safeIntensity).coerceIn(0.78f, 0.95f)),
+                    solidTint.copy(alpha = (0.82f * safeIntensity).coerceIn(0.75f, 0.93f)),
+                    solidTint.copy(alpha = (0.88f * safeIntensity).coerceIn(0.80f, 0.96f))
+                ),
+                start = Offset.Zero,
+                end = Offset(size.width, size.height)
+            )
+
+            val meniscusBrush = Brush.verticalGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = (0.14f * safeIntensity).coerceIn(0f, 0.24f)),
+                    Color.White.copy(alpha = (0.03f * safeIntensity).coerceIn(0f, 0.08f)),
+                    Color.Transparent
+                ),
+                startY = 0f,
+                endY = (size.height * 0.35f).coerceAtLeast(1f)
+            )
+
+            val sheenBrush = Brush.linearGradient(
+                colors = listOf(
+                    Color.Transparent,
+                    Color.White.copy(alpha = (0.04f * safeIntensity).coerceIn(0f, 0.10f)),
+                    Color.Transparent
+                ),
+                start = Offset(size.width * 0.15f, 0f),
+                end = Offset(size.width * 0.85f, size.height)
+            )
+
+            val rimBrush = Brush.linearGradient(
+                colors = listOf(
+                    Color.White.copy(alpha = (0.68f * safeIntensity).coerceIn(0f, 0.92f)),
+                    Color.White.copy(alpha = (0.20f * safeIntensity).coerceIn(0f, 0.48f)),
+                    accentRimColor.copy(alpha = (0.58f * safeIntensity).coerceIn(0f, 0.88f)),
+                    Color.White.copy(alpha = (0.42f * safeIntensity).coerceIn(0f, 0.78f))
+                ),
+                start = Offset.Zero,
+                end = Offset(size.width, size.height)
+            )
+
+            val edgeGlowDepthPx = 16.dp.toPx()
+
+            onDrawWithContent {
+                drawOutline(outline = outline, brush = baseFrostBrush)
+                drawOutline(outline = outline, brush = meniscusBrush)
+                drawOutline(outline = outline, brush = sheenBrush)
+
+                val topContact = if (role == LiquidGlassRole.ORB && boundaryState.headerBottomPx > 0f && boundsHolder.bottomPx > boundsHolder.topPx) {
+                    val dist = abs(boundsHolder.topPx - boundaryState.headerBottomPx)
+                    if (dist < edgeZonePx) {
+                        val t = 1f - (dist / edgeZonePx)
+                        (t * t).coerceIn(0f, 1f)
+                    } else 0f
+                } else 0f
+
+                val bottomContact = if (role == LiquidGlassRole.ORB && boundaryState.footerTopPx < Float.MAX_VALUE && boundsHolder.bottomPx > boundsHolder.topPx) {
+                    val dist = abs(boundsHolder.bottomPx - boundaryState.footerTopPx)
+                    if (dist < edgeZonePx) {
+                        val t = 1f - (dist / edgeZonePx)
+                        (t * t).coerceIn(0f, 1f)
+                    } else 0f
+                } else 0f
+
+                val headerReactive = if (role == LiquidGlassRole.HEADER) boundaryState.headerTouchIntensity else 0f
+                val footerReactive = if (role == LiquidGlassRole.FOOTER) boundaryState.footerTouchIntensity else 0f
+
+                // Subtle top-edge meniscus refraction when the orb's top edge touches the Header
+                if (role == LiquidGlassRole.ORB && topContact > 0.02f && size.width > 0f && size.height > 0f) {
+                    val bandH = edgeGlowDepthPx.coerceAtMost(size.height * 0.25f).coerceAtLeast(2f)
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = (0.11f * topContact).coerceIn(0f, 0.14f)),
+                                accentRimColor.copy(alpha = (0.07f * topContact).coerceIn(0f, 0.10f)),
+                                Color.Transparent
+                            ),
+                            startY = 0f,
+                            endY = bandH
+                        ),
+                        topLeft = Offset.Zero,
+                        size = Size(size.width, bandH)
+                    )
+                }
+
+                // Subtle bottom-edge meniscus refraction when the orb's bottom edge touches the Footer
+                if (role == LiquidGlassRole.ORB && bottomContact > 0.02f && size.width > 0f && size.height > 0f) {
+                    val bandH = edgeGlowDepthPx.coerceAtMost(size.height * 0.25f).coerceAtLeast(2f)
+                    val startY = (size.height - bandH).coerceAtLeast(0f)
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                accentRimColor.copy(alpha = (0.07f * bottomContact).coerceIn(0f, 0.10f)),
+                                Color.White.copy(alpha = (0.11f * bottomContact).coerceIn(0f, 0.14f))
+                            ),
+                            startY = startY,
+                            endY = size.height
+                        ),
+                        topLeft = Offset(0f, startY),
+                        size = Size(size.width, bandH)
+                    )
+                }
+
+                // Subtle Header bottom-edge shimmer when an orb edge passes it
+                if (role == LiquidGlassRole.HEADER && headerReactive > 0.02f && size.width > 0f && size.height > 0f) {
+                    val bandH = 12.dp.toPx().coerceAtMost(size.height * 0.35f).coerceAtLeast(2f)
+                    val startY = (size.height - bandH).coerceAtLeast(0f)
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color.White.copy(alpha = (0.10f * headerReactive).coerceIn(0f, 0.13f))
+                            ),
+                            startY = startY,
+                            endY = size.height
+                        ),
+                        topLeft = Offset(0f, startY),
+                        size = Size(size.width, bandH)
+                    )
+                }
+
+                // Subtle Footer top-edge shimmer when an orb edge passes it
+                if (role == LiquidGlassRole.FOOTER && footerReactive > 0.02f && size.width > 0f && size.height > 0f) {
+                    val bandH = 12.dp.toPx().coerceAtMost(size.height * 0.35f).coerceAtLeast(2f)
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = (0.10f * footerReactive).coerceIn(0f, 0.13f)),
+                                Color.Transparent
+                            ),
+                            startY = 0f,
+                            endY = bandH
+                        ),
+                        topLeft = Offset.Zero,
+                        size = Size(size.width, bandH)
+                    )
+                }
+
+                drawContent()
+
+                val activeEdgeBoost = max(
+                    max(topContact, bottomContact),
+                    max(headerReactive, footerReactive)
+                )
+                drawOutline(
+                    outline = outline,
+                    brush = rimBrush,
+                    style = Stroke(width = strokePx * (1f + 0.22f * activeEdgeBoost))
+                )
+            }
+        }
+}
+
+@Composable
+fun rememberHeaderAwareTopPadding(orbSpacing: Dp): Dp {
+    val boundaryState = LocalLiquidScrollBoundary.current
+    val density = LocalDensity.current
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val headerBottomDp = if (boundaryState.headerBottomPx > 0f) {
+        with(density) { boundaryState.headerBottomPx.toDp() }
+    } else {
+        statusBarTop + 72.dp
+    }
+    return headerBottomDp + orbSpacing
+}
+
+// Global package-level Liquid Glass Card, Clickable Card, OutlinedButton & AlertDialog wrappers
+// Automatically upgrades every Card, Clickable Orb/Tile, OutlinedButton, and AlertDialog across all tabs!
 @Composable
 fun Card(
     modifier: Modifier = Modifier,
@@ -334,19 +595,30 @@ fun Card(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
+    val defaultTint = if (isDark) Color(0xFF0E2F29) else Color(0xFFF7FBF9)
     val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
-        colors.containerColor
-    } else if (isDark) {
-        BrandForestSurface
+        when {
+            colors.containerColor.alpha < 0.70f -> {
+                lerp(
+                    defaultTint,
+                    colors.containerColor.copy(alpha = 1f),
+                    colors.containerColor.alpha.coerceIn(0.12f, 0.24f)
+                )
+            }
+            isDark && colors.containerColor.red < 0.2f && colors.containerColor.green < 0.35f -> {
+                defaultTint
+            }
+            else -> {
+                colors.containerColor.copy(alpha = 1f)
+            }
+        }
     } else {
-        Color.White
+        defaultTint
     }
     val rimAccent = border?.brush?.let { brush ->
         if (brush is SolidColor) brush.value else BrandCoralPink
     } ?: if (isDark) BrandCoralPink else BrandMintGreen
 
-    // Keep elevation parameter referenced for zero unused-parameter warnings,
-    // while passing 0.dp to Material3 Card so Android does NOT draw a washed-out white tonal rectangle inside the glass orb!
     val zeroElevation = if (elevation == CardDefaults.cardElevation()) {
         CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
     } else {
@@ -358,7 +630,7 @@ fun Card(
             .liquidGlass(
                 shape = shape,
                 tintColor = glassBaseTint,
-                intensity = if (isDark) 0.96f else 1.12f,
+                intensity = if (isDark) 1.05f else 1.12f,
                 accentRimColor = rimAccent
             ),
         shape = shape,
@@ -385,12 +657,25 @@ fun Card(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
+    val defaultTint = if (isDark) Color(0xFF0C2A25) else Color(0xFFF4FAF7)
     val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
-        colors.containerColor
-    } else if (isDark) {
-        BrandForestSurface
+        when {
+            colors.containerColor.alpha < 0.70f -> {
+                lerp(
+                    defaultTint,
+                    colors.containerColor.copy(alpha = 1f),
+                    colors.containerColor.alpha.coerceIn(0.12f, 0.24f)
+                )
+            }
+            isDark && colors.containerColor.red < 0.2f && colors.containerColor.green < 0.35f -> {
+                defaultTint
+            }
+            else -> {
+                colors.containerColor.copy(alpha = 1f)
+            }
+        }
     } else {
-        Color.White
+        defaultTint
     }
     val rimAccent = border?.brush?.let { brush ->
         if (brush is SolidColor) brush.value else BrandCoralPink
@@ -402,13 +687,14 @@ fun Card(
         CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
     }
 
+    // Clickable cards/orbs have higher intensity (1.22f) so they look more solid and readable
     androidx.compose.material3.Card(
         onClick = onClick,
         modifier = modifier
             .liquidGlass(
                 shape = shape,
                 tintColor = glassBaseTint,
-                intensity = if (isDark) 0.96f else 1.12f,
+                intensity = 1.22f,
                 accentRimColor = rimAccent
             ),
         enabled = enabled,
@@ -419,6 +705,52 @@ fun Card(
         ),
         elevation = zeroElevation,
         border = border,
+        interactionSource = interactionSource,
+        content = content
+    )
+}
+
+@Composable
+fun OutlinedButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    shape: Shape = ButtonDefaults.outlinedShape,
+    colors: ButtonColors = ButtonDefaults.outlinedButtonColors(),
+    elevation: ButtonElevation? = null,
+    border: BorderStroke? = BorderStroke(1.2.dp, BrandCoralPink.copy(alpha = 0.65f)),
+    contentPadding: PaddingValues = ButtonDefaults.ContentPadding,
+    interactionSource: MutableInteractionSource? = null,
+    content: @Composable RowScope.() -> Unit
+) {
+    val isDark = LocalIsDarkTheme.current
+    val solidButtonContainer = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
+        colors.containerColor
+    } else if (isDark) {
+        BrandForestVariant.copy(alpha = 0.88f)
+    } else {
+        Color.White.copy(alpha = 0.92f)
+    }
+    val solidButtonContent = if (colors.contentColor != Color.Unspecified) {
+        colors.contentColor
+    } else if (isDark) {
+        Color.White
+    } else {
+        BrandForestDark
+    }
+
+    androidx.compose.material3.OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        shape = shape,
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = solidButtonContainer,
+            contentColor = solidButtonContent
+        ),
+        elevation = elevation,
+        border = border,
+        contentPadding = contentPadding,
         interactionSource = interactionSource,
         content = content
     )
@@ -443,11 +775,11 @@ fun AlertDialog(
 ) {
     val isDark = LocalIsDarkTheme.current
     val baseGlass = if (containerColor != Color.Unspecified && containerColor != Color.Transparent) {
-        containerColor.copy(alpha = 0.88f)
+        containerColor.copy(alpha = 0.94f)
     } else if (isDark) {
-        BrandForestDark.copy(alpha = 0.88f)
+        BrandForestDark.copy(alpha = 0.94f)
     } else {
-        Color.White.copy(alpha = 0.90f)
+        Color.White.copy(alpha = 0.95f)
     }
     val zeroTonalElevation = if (tonalElevation > 0.dp) 0.dp else 0.dp
     androidx.compose.material3.AlertDialog(
@@ -457,8 +789,9 @@ fun AlertDialog(
             .liquidGlass(
                 shape = shape,
                 tintColor = baseGlass,
-                intensity = 1.18f,
-                accentRimColor = BrandCoralPink
+                intensity = 1.25f,
+                accentRimColor = BrandCoralPink,
+                role = LiquidGlassRole.STATIC
             ),
         dismissButton = dismissButton,
         icon = icon,
@@ -468,7 +801,7 @@ fun AlertDialog(
         containerColor = Color.Transparent,
         iconContentColor = iconContentColor,
         titleContentColor = if (titleContentColor != Color.Unspecified) titleContentColor else if (isDark) Color.White else BrandForestDark,
-        textContentColor = if (textContentColor != Color.Unspecified) textContentColor else if (isDark) Color.White.copy(alpha = 0.92f) else BrandForestDark.copy(alpha = 0.90f),
+        textContentColor = if (textContentColor != Color.Unspecified) textContentColor else if (isDark) Color.White.copy(alpha = 0.95f) else BrandForestDark.copy(alpha = 0.95f),
         tonalElevation = zeroTonalElevation,
         properties = properties
     )
@@ -634,7 +967,11 @@ data class UserAppConfig(
     val colorSuperSharesHex: Long = 0xFFC084FCL, // Purple
     val colorOtherAssetsHex: Long = 0xFFE38391L, // Coral
     val colorLoansHex: Long = 0xFFF87171L, // Red
-    val colorWhatIfHex: Long = 0xFF818CF8L // Indigo
+    val colorWhatIfHex: Long = 0xFF818CF8L, // Indigo
+    // Partner Sharing & Couple Sync
+    val primaryOwnerEmail: String = "",
+    val partnerEmail: String = "",
+    val sharedHouseholdId: String = ""
 )
 
 enum class AppSection(
@@ -736,10 +1073,10 @@ class MainActivity : FragmentActivity() {
                     tertiary = BrandWarmAmber,
                     error = BrandCoralRed,
                     background = Color.Transparent,
-                    surface = BrandForestSurface.copy(alpha = 0.48f),
+                    surface = BrandForestSurface.copy(alpha = 0.88f),
                     onBackground = Color.White,
                     onSurface = Color.White,
-                    surfaceVariant = BrandForestVariant.copy(alpha = 0.42f),
+                    surfaceVariant = BrandForestVariant.copy(alpha = 0.85f),
                     onSurfaceVariant = Color.White
                 )
             } else {
@@ -750,10 +1087,10 @@ class MainActivity : FragmentActivity() {
                     tertiary = BrandWarmAmber,
                     error = BrandCoralRed,
                     background = Color.Transparent,
-                    surface = Color.White.copy(alpha = 0.62f),
+                    surface = Color.White.copy(alpha = 0.90f),
                     onBackground = BrandForestDark,
                     onSurface = BrandForestDark,
-                    surfaceVariant = Color(0xFFDCECE7).copy(alpha = 0.56f),
+                    surfaceVariant = Color(0xFFDCECE7).copy(alpha = 0.88f),
                     onSurfaceVariant = BrandForestDark
                 )
             }
@@ -1099,8 +1436,15 @@ fun ExpenseTrackerApp(
     val userPrefKey = "expnz_user_${currentUser.uid}"
     val sharedPrefs = remember(currentUser.uid) { context.getSharedPreferences(userPrefKey, Context.MODE_PRIVATE) }
     val db = remember { Firebase.firestore }
-    val userDocRef = remember(currentUser.uid) {
-        db.collection("users").document(currentUser.uid).collection("wealth_data").document("main")
+    val currentUserEmail = remember(currentUser.email) { (currentUser.email ?: "").trim().lowercase() }
+
+    var activeHouseholdUid by remember(currentUser.uid) {
+        mutableStateOf(
+            sharedPrefs.getString("linked_household_uid", null)?.takeIf { it.isNotBlank() } ?: currentUser.uid
+        )
+    }
+    val userDocRef = remember(activeHouseholdUid) {
+        db.collection("users").document(activeHouseholdUid).collection("wealth_data").document("main")
     }
 
     fun loadAppConfigFromPrefs(): UserAppConfig {
@@ -1134,19 +1478,38 @@ fun ExpenseTrackerApp(
             colorSuperSharesHex = sharedPrefs.getLong("color_supershares", 0xFFC084FCL),
             colorOtherAssetsHex = sharedPrefs.getLong("color_otherassets", 0xFFE38391L),
             colorLoansHex = sharedPrefs.getLong("color_loans", 0xFFF87171L),
-            colorWhatIfHex = sharedPrefs.getLong("color_whatif", 0xFF818CF8L)
+            colorWhatIfHex = sharedPrefs.getLong("color_whatif", 0xFF818CF8L),
+            primaryOwnerEmail = sharedPrefs.getString("primary_owner_email", currentUserEmail) ?: currentUserEmail,
+            partnerEmail = sharedPrefs.getString("partner_email", "") ?: "",
+            sharedHouseholdId = sharedPrefs.getString("shared_household_id", activeHouseholdUid) ?: activeHouseholdUid
         )
     }
 
     var appConfig by remember { mutableStateOf(loadAppConfigFromPrefs()) }
     var showColorPickerDialog by remember { mutableStateOf(false) }
+
+    val isLoggedInAsPartner = appConfig.isCoupleMode && (
+        activeHouseholdUid != currentUser.uid ||
+            (currentUserEmail.isNotBlank() && appConfig.partnerEmail.isNotBlank() &&
+                currentUserEmail.equals(appConfig.partnerEmail.trim(), ignoreCase = true))
+        )
+    val activeLoggedInPersonName = if (isLoggedInAsPartner) appConfig.person2Name else appConfig.person1Name
+
     val geminiMessages = remember {
         mutableStateListOf(
             ChatMessage(
-                text = "Hello ${appConfig.person1Name}. I am the EXPNZ AI Assistant. Looking at your EXPNZ Wealth overview, how can I assist you with your goals today?",
+                text = "Hello $activeLoggedInPersonName. I am the EXPNZ AI Assistant. Looking at your EXPNZ Wealth overview, how can I assist you with your goals today?",
                 isFromUser = false
             )
         )
+    }
+    LaunchedEffect(activeLoggedInPersonName) {
+        if (geminiMessages.size == 1 && !geminiMessages[0].isFromUser) {
+            geminiMessages[0] = ChatMessage(
+                text = "Hello $activeLoggedInPersonName. I am the EXPNZ AI Assistant. Looking at your EXPNZ Wealth overview, how can I assist you with your goals today?",
+                isFromUser = false
+            )
+        }
     }
 
     val person1Color = Color(appConfig.person1ColorHex)
@@ -1158,69 +1521,159 @@ fun ExpenseTrackerApp(
         }
     }
 
-    fun saveAppConfig(newConfig: UserAppConfig) {
-        appConfig = newConfig
+    fun persistAppConfigToLocalPrefs(cfg: UserAppConfig) {
         sharedPrefs.edit {
-            putBoolean("setup_completed", newConfig.isSetupCompleted)
-            putBoolean("is_couple_mode", newConfig.isCoupleMode)
-            putString("person1_name", newConfig.person1Name)
-            putString("person2_name", newConfig.person2Name)
-            putLong("person1_color", newConfig.person1ColorHex)
-            putLong("person2_color", newConfig.person2ColorHex)
-            putString("property1_name", newConfig.property1Name)
-            putString("property2_name", newConfig.property2Name)
-            putString("property1_url", newConfig.property1Url)
-            putString("property2_url", newConfig.property2Url)
-            putBoolean("is_prop1_rented", newConfig.isProperty1Rented)
-            putBoolean("is_prop2_rented", newConfig.isProperty2Rented)
-            putBoolean("has_second_property", newConfig.hasSecondProperty)
-            putFloat("primary_rent_weekly", newConfig.primaryRentWeekly.toFloat())
-            putFloat("secondary_rent_weekly", newConfig.secondaryRentWeekly.toFloat())
-            putBoolean("mod_total_wealth", newConfig.showTotalWealth)
-            putBoolean("mod_cash_flow", newConfig.showCashFlow)
-            putBoolean("mod_properties", newConfig.showProperties)
-            putBoolean("mod_super_shares", newConfig.showSuperAndShares)
-            putBoolean("mod_other_assets", newConfig.showOtherAssets)
-            putBoolean("mod_loans", newConfig.showLoans)
-            putBoolean("use_expnz_ai", newConfig.useExpnzAi)
-            putLong("color_wealth", newConfig.colorWealthHex)
-            putLong("color_cashflow", newConfig.colorCashFlowHex)
-            putLong("color_properties", newConfig.colorPropertiesHex)
-            putLong("color_supershares", newConfig.colorSuperSharesHex)
-            putLong("color_otherassets", newConfig.colorOtherAssetsHex)
-            putLong("color_loans", newConfig.colorLoansHex)
+            putBoolean("setup_completed", cfg.isSetupCompleted)
+            putBoolean("is_couple_mode", cfg.isCoupleMode)
+            putString("person1_name", cfg.person1Name)
+            putString("person2_name", cfg.person2Name)
+            putLong("person1_color", cfg.person1ColorHex)
+            putLong("person2_color", cfg.person2ColorHex)
+            putString("property1_name", cfg.property1Name)
+            putString("property2_name", cfg.property2Name)
+            putString("property1_url", cfg.property1Url)
+            putString("property2_url", cfg.property2Url)
+            putBoolean("is_prop1_rented", cfg.isProperty1Rented)
+            putBoolean("is_prop2_rented", cfg.isProperty2Rented)
+            putBoolean("has_second_property", cfg.hasSecondProperty)
+            putFloat("primary_rent_weekly", cfg.primaryRentWeekly.toFloat())
+            putFloat("secondary_rent_weekly", cfg.secondaryRentWeekly.toFloat())
+            putBoolean("mod_total_wealth", cfg.showTotalWealth)
+            putBoolean("mod_cash_flow", cfg.showCashFlow)
+            putBoolean("mod_properties", cfg.showProperties)
+            putBoolean("mod_super_shares", cfg.showSuperAndShares)
+            putBoolean("mod_other_assets", cfg.showOtherAssets)
+            putBoolean("mod_loans", cfg.showLoans)
+            putBoolean("mod_what_if", cfg.showWhatIf)
+            putBoolean("use_expnz_ai", cfg.useExpnzAi)
+            putLong("color_wealth", cfg.colorWealthHex)
+            putLong("color_cashflow", cfg.colorCashFlowHex)
+            putLong("color_properties", cfg.colorPropertiesHex)
+            putLong("color_supershares", cfg.colorSuperSharesHex)
+            putLong("color_otherassets", cfg.colorOtherAssetsHex)
+            putLong("color_loans", cfg.colorLoansHex)
+            putLong("color_whatif", cfg.colorWhatIfHex)
+            putString("primary_owner_email", cfg.primaryOwnerEmail)
+            putString("partner_email", cfg.partnerEmail)
+            putString("shared_household_id", cfg.sharedHouseholdId)
         }
+    }
+
+    fun saveAppConfig(newConfig: UserAppConfig) {
+        val enrichedConfig = newConfig.copy(
+            primaryOwnerEmail = newConfig.primaryOwnerEmail.ifBlank {
+                if (!isLoggedInAsPartner) currentUserEmail else ""
+            },
+            sharedHouseholdId = activeHouseholdUid
+        )
+        appConfig = enrichedConfig
+        persistAppConfigToLocalPrefs(enrichedConfig)
         val configMap = hashMapOf(
-            "isSetupCompleted" to newConfig.isSetupCompleted,
-            "isCoupleMode" to newConfig.isCoupleMode,
-            "person1Name" to newConfig.person1Name,
-            "person2Name" to newConfig.person2Name,
-            "person1ColorHex" to newConfig.person1ColorHex,
-            "person2ColorHex" to newConfig.person2ColorHex,
-            "property1Name" to newConfig.property1Name,
-            "property2Name" to newConfig.property2Name,
-            "property1Url" to newConfig.property1Url,
-            "property2Url" to newConfig.property2Url,
-            "isProperty1Rented" to newConfig.isProperty1Rented,
-            "isProperty2Rented" to newConfig.isProperty2Rented,
-            "hasSecondProperty" to newConfig.hasSecondProperty,
-            "primaryRentWeekly" to newConfig.primaryRentWeekly,
-            "secondaryRentWeekly" to newConfig.secondaryRentWeekly,
-            "showTotalWealth" to newConfig.showTotalWealth,
-            "showCashFlow" to newConfig.showCashFlow,
-            "showProperties" to newConfig.showProperties,
-            "showSuperAndShares" to newConfig.showSuperAndShares,
-            "showOtherAssets" to newConfig.showOtherAssets,
-            "showLoans" to newConfig.showLoans,
-            "useExpnzAi" to newConfig.useExpnzAi,
-            "colorWealthHex" to newConfig.colorWealthHex,
-            "colorCashFlowHex" to newConfig.colorCashFlowHex,
-            "colorPropertiesHex" to newConfig.colorPropertiesHex,
-            "colorSuperSharesHex" to newConfig.colorSuperSharesHex,
-            "colorOtherAssetsHex" to newConfig.colorOtherAssetsHex,
-            "colorLoansHex" to newConfig.colorLoansHex
+            "isSetupCompleted" to enrichedConfig.isSetupCompleted,
+            "isCoupleMode" to enrichedConfig.isCoupleMode,
+            "person1Name" to enrichedConfig.person1Name,
+            "person2Name" to enrichedConfig.person2Name,
+            "person1ColorHex" to enrichedConfig.person1ColorHex,
+            "person2ColorHex" to enrichedConfig.person2ColorHex,
+            "property1Name" to enrichedConfig.property1Name,
+            "property2Name" to enrichedConfig.property2Name,
+            "property1Url" to enrichedConfig.property1Url,
+            "property2Url" to enrichedConfig.property2Url,
+            "isProperty1Rented" to enrichedConfig.isProperty1Rented,
+            "isProperty2Rented" to enrichedConfig.isProperty2Rented,
+            "hasSecondProperty" to enrichedConfig.hasSecondProperty,
+            "primaryRentWeekly" to enrichedConfig.primaryRentWeekly,
+            "secondaryRentWeekly" to enrichedConfig.secondaryRentWeekly,
+            "showTotalWealth" to enrichedConfig.showTotalWealth,
+            "showCashFlow" to enrichedConfig.showCashFlow,
+            "showProperties" to enrichedConfig.showProperties,
+            "showSuperAndShares" to enrichedConfig.showSuperAndShares,
+            "showOtherAssets" to enrichedConfig.showOtherAssets,
+            "showLoans" to enrichedConfig.showLoans,
+            "showWhatIf" to enrichedConfig.showWhatIf,
+            "useExpnzAi" to enrichedConfig.useExpnzAi,
+            "colorWealthHex" to enrichedConfig.colorWealthHex,
+            "colorCashFlowHex" to enrichedConfig.colorCashFlowHex,
+            "colorPropertiesHex" to enrichedConfig.colorPropertiesHex,
+            "colorSuperSharesHex" to enrichedConfig.colorSuperSharesHex,
+            "colorOtherAssetsHex" to enrichedConfig.colorOtherAssetsHex,
+            "colorLoansHex" to enrichedConfig.colorLoansHex,
+            "colorWhatIfHex" to enrichedConfig.colorWhatIfHex,
+            "primaryOwnerEmail" to enrichedConfig.primaryOwnerEmail,
+            "partnerEmail" to enrichedConfig.partnerEmail,
+            "sharedHouseholdId" to enrichedConfig.sharedHouseholdId
         )
         updateFirestore("app_config", configMap)
+
+        // Publish the invite lookup & household code in Firestore when owned by currentUser
+        if (activeHouseholdUid == currentUser.uid) {
+            val cleanPartnerEmail = enrichedConfig.partnerEmail.trim().lowercase()
+            val inviteCode = currentUser.uid.take(6).uppercase()
+            val invitePayload = hashMapOf(
+                "householdOwnerUid" to currentUser.uid,
+                "primaryOwnerName" to enrichedConfig.person1Name,
+                "primaryOwnerEmail" to enrichedConfig.primaryOwnerEmail,
+                "partnerName" to enrichedConfig.person2Name,
+                "partnerEmail" to cleanPartnerEmail,
+                "inviteCode" to inviteCode,
+                "updatedAt" to System.currentTimeMillis()
+            )
+            db.collection("household_codes").document(inviteCode).set(invitePayload)
+            if (cleanPartnerEmail.isNotBlank() && cleanPartnerEmail.contains("@")) {
+                db.collection("partner_invites").document(cleanPartnerEmail).set(invitePayload)
+            }
+        }
+    }
+
+    fun linkToPartnerHousehold(targetHouseholdUid: String) {
+        val cleanUid = targetHouseholdUid.trim()
+        if (cleanUid.isNotBlank() && cleanUid != activeHouseholdUid) {
+            sharedPrefs.edit { putString("linked_household_uid", cleanUid) }
+            db.collection("users").document(currentUser.uid)
+                .collection("wealth_data").document("main")
+                .set(hashMapOf("linked_household_uid" to cleanUid), SetOptions.merge())
+                .addOnCompleteListener {
+                    activeHouseholdUid = cleanUid
+                }
+        }
+    }
+
+    fun joinHouseholdByCodeOrEmail(input: String, onResult: (Boolean, String) -> Unit) {
+        val trimmed = input.trim()
+        if (trimmed.isBlank()) {
+            onResult(false, "Please enter a valid 6-digit Invite Code or Partner Email.")
+            return
+        }
+        if (trimmed.contains("@")) {
+            db.collection("partner_invites").document(trimmed.lowercase()).get()
+                .addOnSuccessListener { doc ->
+                    val ownerUid = doc.getString("householdOwnerUid")
+                    if (!ownerUid.isNullOrBlank()) {
+                        linkToPartnerHousehold(ownerUid)
+                        onResult(true, "Connected to shared household!")
+                    } else {
+                        onResult(false, "No invitation found for $trimmed. Ask your partner to invite this email in Settings.")
+                    }
+                }
+                .addOnFailureListener {
+                    onResult(false, "Could not verify invitation: ${it.localizedMessage ?: "Network error"}")
+                }
+        } else {
+            val codeKey = trimmed.uppercase()
+            db.collection("household_codes").document(codeKey).get()
+                .addOnSuccessListener { doc ->
+                    val ownerUid = doc.getString("householdOwnerUid")
+                    if (!ownerUid.isNullOrBlank()) {
+                        linkToPartnerHousehold(ownerUid)
+                        onResult(true, "Connected to shared household ($codeKey)!")
+                    } else {
+                        onResult(false, "Invalid Invite Code '$codeKey'. Check the 6-character code in your partner's Settings.")
+                    }
+                }
+                .addOnFailureListener {
+                    onResult(false, "Could not verify code: ${it.localizedMessage ?: "Network error"}")
+                }
+        }
     }
 
     // Default starter items for new public users
@@ -1254,7 +1707,7 @@ fun ExpenseTrackerApp(
         }
     }
 
-    fun saveList(key: String, list: List<CashflowItem>) {
+    fun persistListToLocalPrefs(key: String, list: List<CashflowItem>) {
         val jsonArr = JSONArray()
         list.forEach {
             val obj = JSONObject()
@@ -1265,6 +1718,10 @@ fun ExpenseTrackerApp(
             jsonArr.put(obj)
         }
         sharedPrefs.edit { putString(key, jsonArr.toString()) }
+    }
+
+    fun saveList(key: String, list: List<CashflowItem>) {
+        persistListToLocalPrefs(key, list)
 
         val serializedList = list.map {
             hashMapOf(
@@ -1420,11 +1877,62 @@ fun ExpenseTrackerApp(
     var isBiometricAuthenticated by remember { mutableStateOf(!isBiometricEnabled) }
     var lastActiveTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
-    // Sync from Firestore
-    LaunchedEffect(currentUser.uid) {
+    // Auto-discover if this logged-in email was invited as a partner to a shared household
+    LaunchedEffect(currentUser.uid, currentUserEmail) {
+        // 0. Ensure this user's own 6-character Household Invite Code is registered in Firestore
+        if (activeHouseholdUid == currentUser.uid) {
+            val cleanPartnerEmail = appConfig.partnerEmail.trim().lowercase()
+            val inviteCode = currentUser.uid.take(6).uppercase()
+            val invitePayload = hashMapOf(
+                "householdOwnerUid" to currentUser.uid,
+                "primaryOwnerName" to appConfig.person1Name,
+                "primaryOwnerEmail" to appConfig.primaryOwnerEmail.ifBlank { currentUserEmail },
+                "partnerName" to appConfig.person2Name,
+                "partnerEmail" to cleanPartnerEmail,
+                "inviteCode" to inviteCode,
+                "updatedAt" to System.currentTimeMillis()
+            )
+            db.collection("household_codes").document(inviteCode).set(invitePayload)
+            if (cleanPartnerEmail.isNotBlank() && cleanPartnerEmail.contains("@")) {
+                db.collection("partner_invites").document(cleanPartnerEmail).set(invitePayload)
+            }
+        }
+
+        // 1. Check user's own profile document for an existing linked_household_uid
+        db.collection("users").document(currentUser.uid)
+            .collection("wealth_data").document("main")
+            .get()
+            .addOnSuccessListener { ownDoc ->
+                val linkedUid = ownDoc.getString("linked_household_uid")
+                if (!linkedUid.isNullOrBlank() && linkedUid != activeHouseholdUid) {
+                    linkToPartnerHousehold(linkedUid)
+                }
+            }
+
+        // 2. Listen in real time to partner_invites/{currentUserEmail} so any invite links immediately
+        if (currentUserEmail.isNotBlank() && currentUserEmail.contains("@")) {
+            db.collection("partner_invites").document(currentUserEmail)
+                .addSnapshotListener { inviteSnap, err ->
+                    if (err != null || inviteSnap == null || !inviteSnap.exists()) return@addSnapshotListener
+                    val ownerUid = inviteSnap.getString("householdOwnerUid")
+                    if (!ownerUid.isNullOrBlank() && ownerUid != activeHouseholdUid) {
+                        linkToPartnerHousehold(ownerUid)
+                    }
+                }
+        }
+    }
+
+    // Real-time bidirectional sync from active Household Firestore document (shared between both partners)
+    LaunchedEffect(activeHouseholdUid) {
         userDocRef.addSnapshotListener { snapshot, e ->
             if (e != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
             val data = snapshot.data ?: return@addSnapshotListener
+
+            val linkedRedirect = data["linked_household_uid"] as? String
+            if (!linkedRedirect.isNullOrBlank() && linkedRedirect != activeHouseholdUid) {
+                linkToPartnerHousehold(linkedRedirect)
+                return@addSnapshotListener
+            }
 
             @Suppress("UNCHECKED_CAST")
             val cfgMap = data["app_config"] as? Map<String, Any>
@@ -1451,24 +1959,36 @@ fun ExpenseTrackerApp(
                     showSuperAndShares = cfgMap["showSuperAndShares"] as? Boolean ?: appConfig.showSuperAndShares,
                     showOtherAssets = cfgMap["showOtherAssets"] as? Boolean ?: appConfig.showOtherAssets,
                     showLoans = cfgMap["showLoans"] as? Boolean ?: appConfig.showLoans,
+                    showWhatIf = cfgMap["showWhatIf"] as? Boolean ?: appConfig.showWhatIf,
                     useExpnzAi = cfgMap["useExpnzAi"] as? Boolean ?: appConfig.useExpnzAi,
                     colorWealthHex = (cfgMap["colorWealthHex"] as? Number)?.toLong() ?: appConfig.colorWealthHex,
                     colorCashFlowHex = (cfgMap["colorCashFlowHex"] as? Number)?.toLong() ?: appConfig.colorCashFlowHex,
                     colorPropertiesHex = (cfgMap["colorPropertiesHex"] as? Number)?.toLong() ?: appConfig.colorPropertiesHex,
                     colorSuperSharesHex = (cfgMap["colorSuperSharesHex"] as? Number)?.toLong() ?: appConfig.colorSuperSharesHex,
                     colorOtherAssetsHex = (cfgMap["colorOtherAssetsHex"] as? Number)?.toLong() ?: appConfig.colorOtherAssetsHex,
-                    colorLoansHex = (cfgMap["colorLoansHex"] as? Number)?.toLong() ?: appConfig.colorLoansHex
+                    colorLoansHex = (cfgMap["colorLoansHex"] as? Number)?.toLong() ?: appConfig.colorLoansHex,
+                    colorWhatIfHex = (cfgMap["colorWhatIfHex"] as? Number)?.toLong() ?: appConfig.colorWhatIfHex,
+                    primaryOwnerEmail = cfgMap["primaryOwnerEmail"] as? String ?: appConfig.primaryOwnerEmail,
+                    partnerEmail = cfgMap["partnerEmail"] as? String ?: appConfig.partnerEmail,
+                    sharedHouseholdId = cfgMap["sharedHouseholdId"] as? String ?: activeHouseholdUid
                 )
                 appConfig = remoteCfg
+                persistAppConfigToLocalPrefs(remoteCfg)
             }
 
-            person1Income = (data["person1_inc"] as? Number)?.toDouble() ?: person1Income
-            person2Income = (data["person2_inc"] as? Number)?.toDouble() ?: person2Income
+            (data["person1_inc"] as? Number)?.toDouble()?.let {
+                person1Income = it
+                sharedPrefs.edit { putFloat("person1_inc", it.toFloat()) }
+            }
+            (data["person2_inc"] as? Number)?.toDouble()?.let {
+                person2Income = it
+                sharedPrefs.edit { putFloat("person2_inc", it.toFloat()) }
+            }
 
             @Suppress("UNCHECKED_CAST")
             fun parseList(key: String, current: List<CashflowItem>): List<CashflowItem> {
                 val rawList = data[key] as? List<Map<String, Any>> ?: return current
-                return rawList.mapNotNull {
+                val parsed = rawList.mapNotNull {
                     try {
                         CashflowItem(
                             id = it["id"] as? String ?: return@mapNotNull null,
@@ -1479,6 +1999,8 @@ fun ExpenseTrackerApp(
                         )
                     } catch (_: Exception) { null }
                 }
+                persistListToLocalPrefs(key, parsed)
+                return parsed
             }
 
             person1Items = parseList("person1_items", person1Items)
@@ -1518,8 +2040,14 @@ fun ExpenseTrackerApp(
                 }
             }
 
-            prop1EstimatedValue = (data["prop1_market_value"] as? Number)?.toDouble() ?: prop1EstimatedValue
-            prop2EstimatedValue = (data["prop2_market_value"] as? Number)?.toDouble() ?: prop2EstimatedValue
+            (data["prop1_market_value"] as? Number)?.toDouble()?.let {
+                prop1EstimatedValue = it
+                sharedPrefs.edit { putFloat("prop1_val", it.toFloat()) }
+            }
+            (data["prop2_market_value"] as? Number)?.toDouble()?.let {
+                prop2EstimatedValue = it
+                sharedPrefs.edit { putFloat("prop2_val", it.toFloat()) }
+            }
 
             @Suppress("UNCHECKED_CAST")
             val otherAssetsRaw = data["other_assets"] as? List<Map<String, Any>>
@@ -1787,6 +2315,8 @@ fun ExpenseTrackerApp(
     val prop2ItemsStr = if (appConfig.hasSecondProperty) prop2Items.joinToString { "${it.name}: ${formatCurrency(abs(it.weeklyAmount), 2)}/wk" } else ""
 
     val detailedFinancialContext = buildString {
+        append("CURRENTLY LOGGED-IN USER SPEAKING TO YOU: $activeLoggedInPersonName (${if (isLoggedInAsPartner) "Partner / Person 2, Email: ${currentUser.email ?: appConfig.partnerEmail}" else "Primary Account Holder / Person 1, Email: ${currentUser.email ?: appConfig.primaryOwnerEmail}"}). ")
+        append("IMPORTANT RULE: Always address the user directly by their own name '$activeLoggedInPersonName' (NEVER call them '${if (isLoggedInAsPartner) appConfig.person1Name else appConfig.person2Name}'). When they say 'my income', 'my expenses', 'my super', or 'my shares', they mean $activeLoggedInPersonName's (${if (isLoggedInAsPartner) "Person 2" else "Person 1"}) items. ")
         append("EXPLICIT COMPUTED FINANCIAL TOTALS & UNMASKED GLOBAL APP DATA (CURRENT & FUTURE): ")
         append("Exact Net Worth Today = ${formatCurrency(exactNetWorth, 2)}. ")
         append("Exact Total Assets Today = ${formatCurrency(exactTotalAssets, 2)} (Properties: ${formatCurrency(prop1Val + prop2Val, 0)}, Shares: ${formatCurrency(sharesVal, 0)}, Super: ${formatCurrency(superVal, 0)}, Other Assets: ${formatCurrency(otherVal, 0)}, Offset Accounts: ${formatCurrency(offsetsVal, 0)}). ")
@@ -2249,7 +2779,8 @@ fun ExpenseTrackerApp(
                         shape = headerGlassShape,
                         tintColor = BrandForestDark,
                         intensity = 1.15f,
-                        accentRimColor = currentSection.getColor(appConfig)
+                        accentRimColor = currentSection.getColor(appConfig),
+                        role = LiquidGlassRole.HEADER
                     ),
                 shape = headerGlassShape,
                 color = Color.Transparent,
@@ -2298,7 +2829,8 @@ fun ExpenseTrackerApp(
                                     shape = CircleShape,
                                     tintColor = BrandForestSurface,
                                     intensity = 1.2f,
-                                    accentRimColor = if (isWealthHidden) BrandCoralPink else Color.White
+                                    accentRimColor = if (isWealthHidden) BrandCoralPink else Color.White,
+                                    role = LiquidGlassRole.STATIC
                                 )
                         ) {
                             IconButton(onClick = { isWealthHidden = !isWealthHidden }) {
@@ -2327,8 +2859,13 @@ fun ExpenseTrackerApp(
         )
     }
 
+    val liquidBoundaryState = remember { LiquidScrollBoundaryState() }
+    var isHorizontalChildTouched by remember { mutableStateOf(false) }
 
-
+    CompositionLocalProvider(
+        LocalLiquidScrollBoundary provides liquidBoundaryState,
+        LocalOnHorizontalChildTouchChange provides { isHorizontalChildTouched = it }
+    ) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -2353,7 +2890,8 @@ fun ExpenseTrackerApp(
                             shape = railShape,
                             tintColor = BrandForestDark,
                             intensity = 1.15f,
-                            accentRimColor = currentSection.getColor(appConfig)
+                            accentRimColor = currentSection.getColor(appConfig),
+                            role = LiquidGlassRole.STATIC
                         )
                 ) {
                     Spacer(Modifier.height(16.dp))
@@ -2378,10 +2916,9 @@ fun ExpenseTrackerApp(
                     }
                 }
                 Box(modifier = Modifier.fillMaxSize()) {
-                    // Horizontal Pager allowing left/right swipes between tabs (disabled on What-If/Settings so sliders slide freely)
                     HorizontalPager(
                         state = pagerState,
-                        userScrollEnabled = currentSection != AppSection.WHAT_IF && currentSection != AppSection.SETTINGS,
+                        userScrollEnabled = !isHorizontalChildTouched,
                         modifier = Modifier.fillMaxSize()
                     ) { page ->
                         val section = activeSections[page]
@@ -2418,6 +2955,7 @@ fun ExpenseTrackerApp(
                                 person1Income = person1Income,
                                 person2Income = person2Income,
                                 isWealthHidden = isWealthHidden,
+                                isPartnerLoggedIn = isLoggedInAsPartner,
                                 onUpdateIncome = { isPerson1, newInc ->
                                     if (isPerson1) {
                                         person1Income = newInc
@@ -2504,7 +3042,6 @@ fun ExpenseTrackerApp(
                                 prop2MarketValue = prop2EstimatedValue,
                                 prop1LoanBalance = prop1LiveBalance,
                                 prop2LoanBalance = prop2LiveBalance,
-                                onUpdatePropertyValuation = { p1, p2 -> savePropertyValuations(p1, p2) },
                                 onUpdateAppConfig = { saveAppConfig(it) }
                             )
                             AppSection.SUPER_SHARES -> SuperAndSharesScreen(
@@ -2644,7 +3181,10 @@ fun ExpenseTrackerApp(
                                 prop2Loan = prop2Loan,
                                 isWealthHidden = isWealthHidden,
                                 onUpdateProp1Loan = { saveProp1Loan(it) },
-                                onUpdateProp2Loan = { saveProp2Loan(it) }
+                                onUpdateProp2Loan = { saveProp2Loan(it) },
+                                householdInviteCode = activeHouseholdUid.take(6).uppercase(),
+                                isPartnerSession = isLoggedInAsPartner,
+                                onJoinHousehold = { codeOrEmail, cb -> joinHouseholdByCodeOrEmail(codeOrEmail, cb) }
                             )
                         }
                     }
@@ -2658,7 +3198,7 @@ fun ExpenseTrackerApp(
                     if (appConfig.useExpnzAi) {
                         FloatingAiAssistantWidget(
                             financialContextSummary = detailedFinancialContext,
-                            personName = appConfig.person1Name,
+                            personName = activeLoggedInPersonName,
                             messages = geminiMessages,
                             onAddImportedShares = { newParcels: List<ShareParcel> ->
                                 val updated = sharesList + newParcels
@@ -2671,10 +3211,9 @@ fun ExpenseTrackerApp(
             }
         } else {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Horizontal Pager for mobile layout (disabled on What-If/Settings so sliders slide freely)
                 HorizontalPager(
                     state = pagerState,
-                    userScrollEnabled = currentSection != AppSection.WHAT_IF && currentSection != AppSection.SETTINGS,
+                    userScrollEnabled = !isHorizontalChildTouched,
                     modifier = Modifier.fillMaxSize()
                 ) { page ->
                     val section = activeSections[page]
@@ -2711,6 +3250,7 @@ fun ExpenseTrackerApp(
                             person1Income = person1Income,
                             person2Income = person2Income,
                             isWealthHidden = isWealthHidden,
+                            isPartnerLoggedIn = isLoggedInAsPartner,
                             onUpdateIncome = { isPerson1, newInc ->
                                 if (isPerson1) {
                                     person1Income = newInc
@@ -2797,7 +3337,6 @@ fun ExpenseTrackerApp(
                             prop2MarketValue = prop2EstimatedValue,
                             prop1LoanBalance = prop1LiveBalance,
                             prop2LoanBalance = prop2LiveBalance,
-                            onUpdatePropertyValuation = { p1, p2 -> savePropertyValuations(p1, p2) },
                             onUpdateAppConfig = { saveAppConfig(it) }
                         )
                         AppSection.SUPER_SHARES -> SuperAndSharesScreen(
@@ -2937,7 +3476,10 @@ fun ExpenseTrackerApp(
                             prop2Loan = prop2Loan,
                             isWealthHidden = isWealthHidden,
                             onUpdateProp1Loan = { saveProp1Loan(it) },
-                            onUpdateProp2Loan = { saveProp2Loan(it) }
+                            onUpdateProp2Loan = { saveProp2Loan(it) },
+                            householdInviteCode = activeHouseholdUid.take(6).uppercase(),
+                            isPartnerSession = isLoggedInAsPartner,
+                            onJoinHousehold = { codeOrEmail, cb -> joinHouseholdByCodeOrEmail(codeOrEmail, cb) }
                         )
                     }
                 }
@@ -2970,7 +3512,8 @@ fun ExpenseTrackerApp(
                                 shape = dockShape,
                                 tintColor = BrandForestDark,
                                 intensity = 1.20f,
-                                accentRimColor = currentSection.getColor(appConfig)
+                                accentRimColor = currentSection.getColor(appConfig),
+                                role = LiquidGlassRole.FOOTER
                             )
                     ) {
                         activeSections.forEachIndexed { index, section ->
@@ -2995,7 +3538,7 @@ fun ExpenseTrackerApp(
                 if (appConfig.useExpnzAi) {
                     FloatingAiAssistantWidget(
                         financialContextSummary = detailedFinancialContext,
-                        personName = appConfig.person1Name,
+                        personName = activeLoggedInPersonName,
                         messages = geminiMessages,
                         onAddImportedShares = { newParcels: List<ShareParcel> ->
                             val updated = sharesList + newParcels
@@ -3006,6 +3549,7 @@ fun ExpenseTrackerApp(
                 }
             }
         }
+    }
     }
 }
 
@@ -4246,13 +4790,21 @@ fun SettingsScreen(
     prop2Loan: LoanConfig = LoanConfig("Property 2", "2024-01-01", 500000.0, 30, 480000.0, 28.0, 6.25, 10000.0),
     isWealthHidden: Boolean = false,
     onUpdateProp1Loan: (LoanConfig) -> Unit = {},
-    onUpdateProp2Loan: (LoanConfig) -> Unit = {}
+    onUpdateProp2Loan: (LoanConfig) -> Unit = {},
+    householdInviteCode: String = "",
+    isPartnerSession: Boolean = false,
+    onJoinHousehold: (String, (Boolean, String) -> Unit) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val auth = remember { FirebaseAuth.getInstance() }
     val user = auth.currentUser
     var showEditProfileDialog by remember { mutableStateOf(false) }
+    var showInvitePartnerDialog by remember { mutableStateOf(false) }
+    var showJoinHouseholdDialog by remember { mutableStateOf(false) }
     var showLoansSubScreen by rememberSaveable { mutableStateOf(false) }
+
+    val orbSpacing = 14.dp
+    val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
 
     fun maskVal(amt: Double, decimals: Int = 0): String =
         if (isWealthHidden) "$ ••••••" else formatCurrency(amt, decimals)
@@ -4266,12 +4818,12 @@ fun SettingsScreen(
                 isWealthHidden = isWealthHidden,
                 onUpdateProp1 = onUpdateProp1Loan,
                 onUpdateProp2 = onUpdateProp2Loan,
-                topPadding = 168.dp
+                topPadding = headerTopPad + 56.dp + orbSpacing
             )
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 104.dp, start = 16.dp, end = 16.dp),
+                    .padding(top = headerTopPad, start = 16.dp, end = 16.dp),
                 shape = RoundedCornerShape(14.dp),
                 color = BrandForestDark,
                 border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f)),
@@ -4317,8 +4869,8 @@ fun SettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         // SECTION 0: HOME LOANS & OFFSET AMORTIZATION (MOVED FROM FOOTER TO SETTINGS)
         item {
@@ -4590,6 +5142,142 @@ fun SettingsScreen(
             }
         }
 
+        // SECTION 2B: INVITE PARTNER TO SHARE APP (SHARED COUPLE ACCOUNT & REAL-TIME SYNC)
+        item {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, BrandMintGreen.copy(alpha = 0.45f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = BrandMintGreen.copy(alpha = 0.18f),
+                                modifier = Modifier.size(44.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.GroupAdd,
+                                    contentDescription = null,
+                                    tint = BrandMintGreen,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    "Invite Partner to Share App",
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 16.sp,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    when {
+                                        isPartnerSession -> "Logged in as ${appConfig.person2Name} • Shared with ${appConfig.person1Name}"
+                                        appConfig.partnerEmail.isNotBlank() -> "Invited: ${appConfig.person2Name} (${appConfig.partnerEmail})"
+                                        appConfig.isCoupleMode -> "Share live read/write access with ${appConfig.person2Name}"
+                                        else -> "Enable Couple Mode & invite your partner to share live data"
+                                    },
+                                    fontSize = 12.sp,
+                                    color = SlateGray
+                                )
+                            }
+                        }
+                        if (isPartnerSession || appConfig.partnerEmail.isNotBlank()) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = BrandMintGreen.copy(alpha = 0.2f),
+                                border = BorderStroke(1.dp, BrandMintGreen)
+                            ) {
+                                Text(
+                                    if (isPartnerSession) "LINKED" else "SHARED",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = BrandMintGreen,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    if (householdInviteCode.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("Household Invite Code", fontSize = 11.sp, color = SlateGray, fontWeight = FontWeight.Bold)
+                                    Text(householdInviteCode, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold, color = BrandMintGreen, letterSpacing = 1.5.sp)
+                                }
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text("Sync Mode", fontSize = 11.sp, color = SlateGray)
+                                    Text("Real-Time Read & Write", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = { showInvitePartnerDialog = true },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = BrandMintGreen, contentColor = BrandForestDark)
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                if (appConfig.partnerEmail.isNotBlank()) "Manage Invite" else "Invite Partner",
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.sp,
+                                maxLines = 1
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { showJoinHouseholdDialog = true },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.Link, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "Link Partner Code",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp,
+                                color = BrandCoralPink,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // SECTION 3: APPEARANCE & BIOMETRICS
         item {
             Card(
@@ -4710,6 +5398,158 @@ fun SettingsScreen(
             onSave = { updated ->
                 onUpdateAppConfig(updated)
                 showEditProfileDialog = false
+            }
+        )
+    }
+
+    if (showInvitePartnerDialog) {
+        var partnerNameInput by remember { mutableStateOf(appConfig.person2Name) }
+        var partnerEmailInput by remember { mutableStateOf(appConfig.partnerEmail) }
+
+        AlertDialog(
+            onDismissRequest = { showInvitePartnerDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.GroupAdd, contentDescription = null, tint = BrandMintGreen)
+                    Text("Invite Partner to Share App", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Enter your partner's name and email below. When your partner creates their own EXPNZ account (or signs in) using this email, they will automatically connect to your shared household with full real-time read & write access.",
+                        fontSize = 12.sp,
+                        color = SlateGray
+                    )
+                    OutlinedTextField(
+                        value = partnerNameInput,
+                        onValueChange = { partnerNameInput = it },
+                        label = { Text("Partner's Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = partnerEmailInput,
+                        onValueChange = { partnerEmailInput = it },
+                        label = { Text("Partner's Email Address") },
+                        placeholder = { Text("partner@example.com") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (householdInviteCode.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = BrandMintGreen.copy(alpha = 0.14f),
+                            border = BorderStroke(1.dp, BrandMintGreen.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("Backup Household Invite Code: $householdInviteCode", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp, color = BrandMintGreen)
+                                Text("Your partner can also enter this code under Settings > Link Partner Code.", fontSize = 11.sp, color = SlateGray)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val cleanEmail = partnerEmailInput.trim().lowercase()
+                        val cleanName = partnerNameInput.trim().ifBlank { "Partner" }
+                        if (cleanEmail.isBlank() || !cleanEmail.contains("@")) {
+                            Toast.makeText(context, "Please enter a valid partner email address", Toast.LENGTH_SHORT).show()
+                            return@Button
+                        }
+                        onUpdateAppConfig(
+                            appConfig.copy(
+                                isCoupleMode = true,
+                                person2Name = cleanName,
+                                partnerEmail = cleanEmail
+                            )
+                        )
+                        showInvitePartnerDialog = false
+
+                        val shareText = buildString {
+                            append("Hi $cleanName! I've invited you to share our household wealth & budget tracker on EXPNZ.\n\n")
+                            append("1. Open EXPNZ and Sign Up (or Sign In) with your email: $cleanEmail\n")
+                            append("2. Your account will automatically sync with our shared household data (or use Invite Code: $householdInviteCode in Settings).")
+                        }
+                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Join our shared EXPNZ Household")
+                            putExtra(Intent.EXTRA_TEXT, shareText)
+                        }
+                        context.startActivity(Intent.createChooser(sendIntent, "Send Partner Invite"))
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandMintGreen, contentColor = BrandForestDark)
+                ) {
+                    Text("Save & Share Invite", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showInvitePartnerDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showJoinHouseholdDialog) {
+        var codeOrEmailInput by remember { mutableStateOf("") }
+        var joinStatusMessage by remember { mutableStateOf<String?>(null) }
+
+        AlertDialog(
+            onDismissRequest = { showJoinHouseholdDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Default.Link, contentDescription = null, tint = BrandCoralPink)
+                    Text("Link to Partner's Household", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        "Enter the 6-character Household Invite Code from your partner's Settings (or enter your invited email address) to access and edit the same live wealth dataset.",
+                        fontSize = 12.sp,
+                        color = SlateGray
+                    )
+                    OutlinedTextField(
+                        value = codeOrEmailInput,
+                        onValueChange = {
+                            codeOrEmailInput = it
+                            joinStatusMessage = null
+                        },
+                        label = { Text("6-Digit Invite Code or Invited Email") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    joinStatusMessage?.let { msg ->
+                        Text(msg, fontSize = 12.sp, color = BrandCoralPink, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onJoinHousehold(codeOrEmailInput) { success, msg ->
+                            if (success) {
+                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                showJoinHouseholdDialog = false
+                            } else {
+                                joinStatusMessage = msg
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
+                ) {
+                    Text("Link Household", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showJoinHouseholdDialog = false }) {
+                    Text("Cancel")
+                }
             }
         )
     }
@@ -4848,6 +5688,7 @@ fun MoneyPlanScreen(
     person1Items: List<CashflowItem>,
     person2Items: List<CashflowItem>,
     isWealthHidden: Boolean = false,
+    isPartnerLoggedIn: Boolean = false,
     onAddPerson1: (String, Double, String) -> Unit,
     onEditPerson1: (String, String, Double, String) -> Unit,
     onDeletePerson1: (String) -> Unit,
@@ -4855,9 +5696,15 @@ fun MoneyPlanScreen(
     onEditPerson2: (String, String, Double, String) -> Unit,
     onDeletePerson2: (String) -> Unit
 ) {
-    var selectedPerson by remember { mutableIntStateOf(0) }
-    LaunchedEffect(appConfig.isCoupleMode) {
-        if (!appConfig.isCoupleMode) selectedPerson = 0
+    var selectedPerson by rememberSaveable(isPartnerLoggedIn) {
+        mutableIntStateOf(if (appConfig.isCoupleMode && isPartnerLoggedIn) 1 else 0)
+    }
+    LaunchedEffect(appConfig.isCoupleMode, isPartnerLoggedIn) {
+        if (!appConfig.isCoupleMode) {
+            selectedPerson = 0
+        } else if (isPartnerLoggedIn) {
+            selectedPerson = 1
+        }
     }
 
     var showAddDialog by remember { mutableStateOf(false) }
@@ -4877,12 +5724,15 @@ fun MoneyPlanScreen(
     val combinedSurplus = p1Surplus + p2Surplus
     val combinedIncome = person1Income + (if (appConfig.isCoupleMode) person2Income else 0.0)
 
+    val orbSpacing = 14.dp
+    val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         item {
             Card(
@@ -4938,17 +5788,7 @@ fun MoneyPlanScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        PersonSummaryPill(
-                            title = appConfig.person1Name,
-                            income = person1Income,
-                            surplus = p1Surplus,
-                            accent = person1Color,
-                            isSelected = selectedPerson == 0,
-                            isWealthHidden = isWealthHidden,
-                            modifier = Modifier.weight(1f),
-                            onClick = { selectedPerson = 0 }
-                        )
-                        if (appConfig.isCoupleMode) {
+                        if (appConfig.isCoupleMode && isPartnerLoggedIn) {
                             PersonSummaryPill(
                                 title = appConfig.person2Name,
                                 income = person2Income,
@@ -4959,8 +5799,40 @@ fun MoneyPlanScreen(
                                 modifier = Modifier.weight(1f),
                                 onClick = { selectedPerson = 1 }
                             )
+                            PersonSummaryPill(
+                                title = appConfig.person1Name,
+                                income = person1Income,
+                                surplus = p1Surplus,
+                                accent = person1Color,
+                                isSelected = selectedPerson == 0,
+                                isWealthHidden = isWealthHidden,
+                                modifier = Modifier.weight(1f),
+                                onClick = { selectedPerson = 0 }
+                            )
+                        } else {
+                            PersonSummaryPill(
+                                title = appConfig.person1Name,
+                                income = person1Income,
+                                surplus = p1Surplus,
+                                accent = person1Color,
+                                isSelected = selectedPerson == 0,
+                                isWealthHidden = isWealthHidden,
+                                modifier = Modifier.weight(1f),
+                                onClick = { selectedPerson = 0 }
+                            )
+                            if (appConfig.isCoupleMode) {
+                                PersonSummaryPill(
+                                    title = appConfig.person2Name,
+                                    income = person2Income,
+                                    surplus = p2Surplus,
+                                    accent = person2Color,
+                                    isSelected = selectedPerson == 1,
+                                    isWealthHidden = isWealthHidden,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { selectedPerson = 1 }
+                                )
+                            }
                         }
-
                     }
                 }
             }
@@ -5207,7 +6079,6 @@ fun PropertiesScreen(
     prop1LoanBalance: Double,
     prop2LoanBalance: Double,
     isWealthHidden: Boolean = false,
-    onUpdatePropertyValuation: (Double, Double) -> Unit,
     onUpdateAppConfig: (UserAppConfig) -> Unit
 ) {
     var selectedProperty by remember { mutableIntStateOf(0) }
@@ -5232,12 +6103,15 @@ fun PropertiesScreen(
     val prop2Expenses = if (appConfig.hasSecondProperty) prop2Items.sumOf { it.weeklyAmount } else 0.0
     val prop2Net = prop2RentIncome + prop2Mortgage + prop2Expenses
 
+    val orbSpacing = 14.dp
+    val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         if (appConfig.hasSecondProperty) {
             item {
@@ -5275,7 +6149,6 @@ fun PropertiesScreen(
 
             var showRentEditDialog by remember { mutableStateOf(false) }
             var showMgmtFeeDialog by remember { mutableStateOf(false) }
-            var showValuationDialog by remember { mutableStateOf(false) }
 
             if (isProp1) {
                 val isRented = appConfig.isProperty1Rented
@@ -5286,7 +6159,7 @@ fun PropertiesScreen(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
-                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -5309,21 +6182,18 @@ fun PropertiesScreen(
                             val currentRent = appConfig.primaryRentWeekly
                             LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
 
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(
-                                    onClick = { showMgmtFeeDialog = true },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
-                                    Text("+ Add Mgmt Fee %", fontSize = 11.sp, color = BrandCoralPink)
-                                }
-                                OutlinedButton(
-                                    onClick = { showAddDialog = true },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
-                                    Text("+ Add Expense", fontSize = 11.sp, color = BrandMintGreen)
-                                }
+                            FilledTonalButton(
+                                onClick = { showMgmtFeeDialog = true },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = BrandCoralPink,
+                                    contentColor = BrandForestDark
+                                )
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Add Property Management Fee", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
                             }
                         }
                     }
@@ -5348,9 +6218,6 @@ fun PropertiesScreen(
                                         }
                                     }
                                     Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
-                                }
-                                IconButton(onClick = { showValuationDialog = true }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit Value", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
                                 }
                             }
 
@@ -5386,9 +6253,6 @@ fun PropertiesScreen(
                                     }
                                     Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
                                 }
-                                IconButton(onClick = { showValuationDialog = true }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit Value", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
-                                }
                             }
 
                             LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
@@ -5405,7 +6269,7 @@ fun PropertiesScreen(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
-                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -5423,21 +6287,18 @@ fun PropertiesScreen(
                             val currentRent = appConfig.secondaryRentWeekly
                             LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
 
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(
-                                    onClick = { showMgmtFeeDialog = true },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
-                                    Text("+ Add Mgmt Fee %", fontSize = 11.sp, color = BrandCoralPink)
-                                }
-                                OutlinedButton(
-                                    onClick = { showAddDialog = true },
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(10.dp)
-                                ) {
-                                    Text("+ Add Expense", fontSize = 11.sp, color = BrandMintGreen)
-                                }
+                            FilledTonalButton(
+                                onClick = { showMgmtFeeDialog = true },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = BrandCoralPink,
+                                    contentColor = BrandForestDark
+                                )
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Add Property Management Fee", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
                             }
                         }
                     }
@@ -5474,19 +6335,6 @@ fun PropertiesScreen(
                             onAddProp2(name, amount, "Utility")
                         }
                         showMgmtFeeDialog = false
-                    }
-                )
-            }
-
-            if (showValuationDialog) {
-                LivePropertyPriceSyncDialog(
-                    propertyName = activePropName,
-                    currentValuation = estVal,
-                    onDismiss = { showValuationDialog = false },
-                    onSyncValuation = { newVal ->
-                        if (isProp1) onUpdatePropertyValuation(newVal, prop2MarketValue)
-                        else onUpdatePropertyValuation(prop1MarketValue, newVal)
-                        showValuationDialog = false
                     }
                 )
             }
@@ -5553,54 +6401,59 @@ fun PropertiesScreen(
         item {
             val isProp1 = selectedProperty == 0
             val isRented = if (isProp1) appConfig.isProperty1Rented else (appConfig.isProperty2Rented || appConfig.secondaryRentWeekly > 0.0)
-            if (isRented) {
-                var showRentEditDialog by remember { mutableStateOf(false) }
-                val currentRentAmt = if (isProp1) -appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
-                ExpenseItemCard(
-                    item = CashflowItem(
-                        id = "rent_sync",
-                        name = "Weekly Gross Rent",
-                        weeklyAmount = currentRentAmt,
-                        isLockedMortgageOrPropertyLink = true,
-                        iconName = "Home"
-                    ),
-                    accentColor = if (currentRentAmt >= 0) BrandMintGreen else BrandCoralPink,
-                    isWealthHidden = isWealthHidden,
-                    onEdit = { showRentEditDialog = true },
-                    onDelete = null
-                )
-                if (showRentEditDialog) {
-                    val editRentBase = if (isProp1) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
-                    EditSingleValueDialog(
-                        title = "Update Weekly Rent Amount",
-                        label = "Weekly Rent ($)",
-                        initialValue = editRentBase,
-                        onDismiss = { showRentEditDialog = false },
-                        onConfirm = { newRent ->
-                            if (isProp1) {
-                                onUpdateAppConfig(appConfig.copy(primaryRentWeekly = newRent))
-                            } else {
-                                onUpdateAppConfig(appConfig.copy(secondaryRentWeekly = newRent))
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                if (isRented) {
+                    var showRentEditDialog by remember { mutableStateOf(false) }
+                    val currentRentAmt = if (isProp1) -appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
+                    ExpenseItemCard(
+                        item = CashflowItem(
+                            id = "rent_sync",
+                            name = "Weekly Gross Rent",
+                            weeklyAmount = currentRentAmt,
+                            isLockedMortgageOrPropertyLink = true,
+                            iconName = "Home"
+                        ),
+                        accentColor = if (currentRentAmt >= 0) BrandMintGreen else BrandCoralPink,
+                        isWealthHidden = isWealthHidden,
+                        onEdit = { showRentEditDialog = true },
+                        onDelete = null
+                    )
+                    if (showRentEditDialog) {
+                        val editRentBase = if (isProp1) appConfig.primaryRentWeekly else appConfig.secondaryRentWeekly
+                        EditSingleValueDialog(
+                            title = "Update Weekly Rent Amount",
+                            label = "Weekly Rent ($)",
+                            initialValue = editRentBase,
+                            onDismiss = { showRentEditDialog = false },
+                            onConfirm = { newRent ->
+                                if (isProp1) {
+                                    onUpdateAppConfig(appConfig.copy(primaryRentWeekly = newRent))
+                                } else {
+                                    onUpdateAppConfig(appConfig.copy(secondaryRentWeekly = newRent))
+                                }
+                                showRentEditDialog = false
                             }
-                            showRentEditDialog = false
-                        }
+                        )
+                    }
+                }
+                if (appConfig.showLoans) {
+                    val weeklyMort = if (selectedProperty == 0) prop1WeeklyMortgage else prop2WeeklyMortgage
+                    ExpenseItemCard(
+                        item = CashflowItem(
+                            id = "mort_sync",
+                            name = "Mortgage Payment (Auto-Synced from Loan Tab)",
+                            weeklyAmount = weeklyMort,
+                            isLockedMortgageOrPropertyLink = true,
+                            iconName = "Home"
+                        ),
+                        accentColor = BrandCoralPink,
+                        isWealthHidden = isWealthHidden,
+                        onDelete = null
                     )
                 }
-            }
-            if (appConfig.showLoans) {
-                val weeklyMort = if (selectedProperty == 0) prop1WeeklyMortgage else prop2WeeklyMortgage
-                ExpenseItemCard(
-                    item = CashflowItem(
-                        id = "mort_sync",
-                        name = "Mortgage Payment (Auto-Synced from Loan Tab)",
-                        weeklyAmount = weeklyMort,
-                        isLockedMortgageOrPropertyLink = true,
-                        iconName = "Home"
-                    ),
-                    accentColor = BrandCoralPink,
-                    isWealthHidden = isWealthHidden,
-                    onDelete = null
-                )
             }
         }
 
@@ -5935,6 +6788,7 @@ fun LoansAndOffsetScreen(
                             onUpdateActive(activeLoan.copy(offsetBalance = stepped))
                         },
                         valueRange = 0f..400000f,
+                        modifier = Modifier.lockPagerOnTouch(),
                         colors = SliderDefaults.colors(thumbColor = BrandCoralPink, activeTrackColor = BrandCoralPink)
                     )
                     Text(
@@ -6415,12 +7269,15 @@ fun WhatIfScenarioScreen(
         AussieMilestoneTemplate("💰 Bonus / Inheritance", "Lump Sum Windfall ($50k)", MilestoneCategory.INVESTMENT, 3, 1, 0.0, 50000.0, 0.0)
     )
 
+    val orbSpacing = 16.dp
+    val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         // ====================================================================
         // 1. SQUARE TILES SCENARIO EXPLORER (AUSTRALIAN EDITION)
@@ -6448,7 +7305,10 @@ fun WhatIfScenarioScreen(
                     }
                 }
 
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                LazyRow(
+                    modifier = Modifier.lockPagerOnTouch(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     items(scenarioTiles) { tile ->
                         val isSelected = (tile.id == "status_quo" && !hasAnyChanges) || (tile.id == activeScenarioId && hasAnyChanges)
                         Card(
@@ -6584,24 +7444,29 @@ fun WhatIfScenarioScreen(
 
                         val isPositiveDiff = netWorthDifference >= 0
                         val planAccent = if (!hasAnyChanges) BrandSkyBlue else if (isPositiveDiff) BrandMintGreen else BrandCoralPink
+                        val isDarkPlanOrb = LocalIsDarkTheme.current
+                        val planHeaderColor = if (isDarkPlanOrb) planAccent else BrandForestDark
+                        val planValueColor = if (isDarkPlanOrb) Color.White else BrandForestDark
+                        val planSubColor = if (isDarkPlanOrb) planAccent else BrandForestSurface
                         Card(
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(14.dp),
-                            colors = CardDefaults.cardColors(containerColor = planAccent.copy(alpha = 0.14f)),
+                            colors = CardDefaults.cardColors(containerColor = planAccent.copy(alpha = 0.16f)),
                             border = BorderStroke(1.5.dp, planAccent)
                         ) {
                             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("WHAT-IF PLAN", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = planAccent)
+                                Text("WHAT-IF PLAN", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = planHeaderColor)
                                 Text(
                                     maskVal(endPathBNetWorth, 0),
                                     fontSize = 17.sp,
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = planAccent
+                                    color = planValueColor
                                 )
                                 Text(
                                     "Surplus: ${maskVal(simulatedWeeklySurplusNow, 0)}/wk",
                                     fontSize = 11.sp,
-                                    color = planAccent
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = planSubColor
                                 )
                             }
                         }
@@ -6958,7 +7823,10 @@ fun WhatIfScenarioScreen(
                     // 1-Tap Quick-Add Australian Templates Row
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Quick-Add Australian Events (tap to customize & add):", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SlateGray)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        LazyRow(
+                            modifier = Modifier.lockPagerOnTouch(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             items(quickMilestoneTemplates) { tmpl ->
                                 AssistChip(
                                     onClick = {
@@ -7088,7 +7956,10 @@ fun WhatIfScenarioScreen(
                         "Can we afford a $750k investment property?",
                         "Impact of two 0.25% RBA rate cuts?"
                     )
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LazyRow(
+                        modifier = Modifier.lockPagerOnTouch(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         items(samplePrompts) { prompt ->
                             SuggestionChip(
                                 onClick = { whatIfChatInput = prompt },
@@ -7427,7 +8298,9 @@ private fun WhatIfInteractiveLeverCard(
                     onValueChange(stepped.coerceIn(valueRange.start, valueRange.endInclusive))
                 },
                 valueRange = valueRange,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .lockPagerOnTouch(),
                 colors = SliderDefaults.colors(
                     thumbColor = accentColor,
                     activeTrackColor = accentColor
@@ -8131,12 +9004,15 @@ fun TotalWealthScreen(
         if (appConfig.showLoans && totalOffsets > 0) add(Triple("Offset / Cash", totalOffsets, BrandMintGreen))
     }
 
+    val orbSpacing = 16.dp
+    val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         // COMBINED NET WEALTH CARD
         item {
@@ -8471,12 +9347,15 @@ fun SuperAndSharesScreen(
 
     val totalSuperVal = filteredSuper.sumOf { it.balance }
 
+    val orbSpacing = 14.dp
+    val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -8941,12 +9820,15 @@ fun OtherAssetsScreen(
     val p1Total = otherAssetsList.filter { it.owner.equals(appConfig.person1Name, ignoreCase = true) }.sumOf { it.value }
     val p2Total = otherAssetsList.filter { it.owner.equals(appConfig.person2Name, ignoreCase = true) }.sumOf { it.value }
 
+    val orbSpacing = 16.dp
+    val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 115.dp, bottom = 100.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -9766,280 +10648,6 @@ fun ManagementFeePercentageDialog(
     )
 }
 
-@Suppress("SetJavaScriptEnabled")
-@Composable
-fun LivePropertyPriceSyncDialog(
-    propertyName: String,
-    currentValuation: Double,
-    onDismiss: () -> Unit,
-    onSyncValuation: (Double) -> Unit
-) {
-    val cleanAddress = propertyName.ifBlank { "Australia" }
-    val encodedAddress = remember(cleanAddress) { URLEncoder.encode("$cleanAddress Australia", "UTF-8") }
-    
-    // Direct realestate.com.au URLs: Login page first to establish session, and target property search page
-    val reaLoginUrl = "https://www.realestate.com.au/login"
-    val reaPropertySearchUrl = "https://www.realestate.com.au/property/in-$encodedAddress"
-
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Property Search, 1 = Login Portal
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var detectedPrices by remember { mutableStateOf<List<Double>>(emptyList()) }
-    var manualSyncInput by remember { mutableStateOf(currentValuation.toInt().toString()) }
-    var isScanningPage by remember { mutableStateOf(false) }
-
-    fun extractPricesFromText(rawText: String): List<Double> {
-        val found = mutableSetOf<Double>()
-        val millionRegex = Regex("""\$\s*(\d+(?:\.\d+)?)\s*[mM]\b""")
-        millionRegex.findAll(rawText).forEach { m ->
-            val num = m.groupValues[1].toDoubleOrNull()
-            if (num != null && num in 0.2..25.0) {
-                found.add((num * 1_000_000.0).roundToInt().toDouble())
-            }
-        }
-        val kRegex = Regex("""\$\s*(\d{3,4}(?:\.\d+)?)\s*[kK]\b""")
-        kRegex.findAll(rawText).forEach { m ->
-            val num = m.groupValues[1].toDoubleOrNull()
-            if (num != null && num in 150.0..9999.0) {
-                found.add((num * 1_000.0).roundToInt().toDouble())
-            }
-        }
-        val fullCurrencyRegex = Regex("""\$\s*(\d{1,3}(?:,\d{3})+)\b""")
-        fullCurrencyRegex.findAll(rawText).forEach { m ->
-            val clean = m.groupValues[1].replace(",", "").toDoubleOrNull()
-            if (clean != null && clean in 150_000.0..25_000_000.0) {
-                found.add(clean)
-            }
-        }
-        return found.toList().sorted()
-    }
-
-    fun scanCurrentWebViewPage() {
-        val wv = webViewRef ?: return
-        isScanningPage = true
-        wv.evaluateJavascript("(function() { return document.body.innerText; })();") { result ->
-            isScanningPage = false
-            if (!result.isNullOrBlank() && result != "null") {
-                val extracted = extractPricesFromText(result)
-                detectedPrices = extracted
-                if (extracted.isNotEmpty()) {
-                    val medianPrice = extracted[extracted.size / 2]
-                    manualSyncInput = medianPrice.toInt().toString()
-                }
-            }
-        }
-    }
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(12.dp),
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 8.dp
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // Header displaying the property address
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(BrandForestDark)
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            "REALESTATE.COM.AU • ADDRESS SYNC",
-                            color = BrandCoralPink,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                        Text(
-                            propertyName,
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                    }
-                }
-
-                // Instruction & Login Status Banner
-                Surface(
-                    color = BrandMintGreen.copy(alpha = 0.12f),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "💡 Step 1: Tap 'Log In' if needed. Step 2: Switch to 'Property Address' to view & scan valuation data for $propertyName.",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(10.dp)
-                    )
-                }
-
-                // Navigation Tabs (Switch between Property Address Search and REA Login)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilterChip(
-                        selected = selectedTab == 0,
-                        onClick = {
-                            selectedTab = 0
-                            webViewRef?.loadUrl(reaPropertySearchUrl)
-                        },
-                        label = { Text("1. Property Address", fontSize = 11.sp) }
-                    )
-                    FilterChip(
-                        selected = selectedTab == 1,
-                        onClick = {
-                            selectedTab = 1
-                            webViewRef?.loadUrl(reaLoginUrl)
-                        },
-                        label = { Text("2. Log In to REA", fontSize = 11.sp) }
-                    )
-                }
-
-                // Detected Valuations Bar
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                ) {
-                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                if (detectedPrices.isEmpty()) "Tap Scan once your address details load below:" else "Detected Valuations (Tap to select):",
-                                fontSize = 11.sp,
-                                color = Color.White,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            TextButton(
-                                onClick = { scanCurrentWebViewPage() },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Icon(Icons.Default.FindInPage, contentDescription = null, tint = BrandMintGreen, modifier = Modifier.size(15.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(if (isScanningPage) "Scanning..." else "Scan Page", color = BrandMintGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        if (detectedPrices.isNotEmpty()) {
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(detectedPrices) { price ->
-                                    SuggestionChip(
-                                        onClick = { manualSyncInput = price.toInt().toString() },
-                                        label = {
-                                            Text(
-                                                formatCurrency(price, 0),
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = BrandMintGreen
-                                            )
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(6.dp))
-
-                // Embedded WebView with Persistent Session Cookies
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .border(1.dp, SlateGray.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                ) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.userAgentString =
-                                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-
-                                val cookieManager = android.webkit.CookieManager.getInstance()
-                                cookieManager.setAcceptCookie(true)
-                                cookieManager.setAcceptThirdPartyCookies(this, true)
-
-                                webViewClient = object : WebViewClient() {
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        super.onPageFinished(view, url)
-                                        android.webkit.CookieManager.getInstance().flush()
-                                        scanCurrentWebViewPage()
-                                    }
-                                }
-                                // Default load the saved property address search
-                                loadUrl(reaPropertySearchUrl)
-                                webViewRef = this
-                            }
-                        }
-                    )
-                }
-
-                // Bottom Save / Sync Bar
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    OutlinedTextField(
-                        value = manualSyncInput,
-                        onValueChange = { manualSyncInput = it },
-                        label = { Text("Valuation to Save ($)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    Button(
-                        onClick = {
-                            val finalPrice = manualSyncInput.toDoubleOrNull()
-                            if (finalPrice != null && finalPrice > 0) {
-                                onSyncValuation(finalPrice)
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = BrandMintGreen,
-                            contentColor = BrandForestDark
-                        ),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)
-                    ) {
-                        Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Save to Property", fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-            }
-        }
-    }
-}
-
-
-
 fun formatCurrency(value: Double, decimals: Int = 2): String {
     val sign = if (value < 0) "-" else if (value > 0) "+" else ""
     val absVal = abs(value)
@@ -10375,7 +10983,8 @@ fun FloatingAiAssistantWidget(
                         shape = CircleShape,
                         tintColor = BrandForestDark,
                         intensity = 1.30f,
-                        accentRimColor = BrandCoralPink
+                        accentRimColor = BrandCoralPink,
+                        role = LiquidGlassRole.STATIC
                     )
                     .pointerInput(Unit) {
                         detectDragGestures { change, dragAmount ->
