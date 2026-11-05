@@ -2925,7 +2925,7 @@ fun ExpenseTrackerApp(
                         role = LiquidGlassRole.HEADER
                     ),
                 shape = headerGlassShape,
-                color = Color.Transparent,
+                color = BrandForestDark.copy(alpha = 0.95f),
                 tonalElevation = 0.dp
             ) {
                 Row(
@@ -3334,10 +3334,21 @@ fun ExpenseTrackerApp(
                             )
                         }
                     }
+                    // Fixed Top Bar overlay with status bar gradient protection scrim
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
                             .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        BrandForestDark,
+                                        BrandForestDark.copy(alpha = 0.95f),
+                                        BrandForestDark.copy(alpha = 0.65f),
+                                        Color.Transparent
+                                    )
+                                )
+                            )
                     ) {
                         topBarContent()
                     }
@@ -3635,11 +3646,21 @@ fun ExpenseTrackerApp(
                     }
                 }
 
-                // Fixed Top Bar overlay
+                // Fixed Top Bar overlay with status bar gradient protection scrim
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    BrandForestDark,
+                                    BrandForestDark.copy(alpha = 0.95f),
+                                    BrandForestDark.copy(alpha = 0.65f),
+                                    Color.Transparent
+                                )
+                            )
+                        )
                 ) {
                     topBarContent()
                 }
@@ -5024,7 +5045,7 @@ fun SettingsScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         // SECTION 0: HOME LOANS & OFFSET AMORTIZATION (MOVED FROM FOOTER TO SETTINGS)
@@ -5890,7 +5911,7 @@ fun MoneyPlanScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         item {
@@ -6270,7 +6291,7 @@ fun PropertiesScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         if (appConfig.hasSecondProperty) {
@@ -6794,7 +6815,7 @@ fun LoansAndOffsetScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = topPadding, bottom = 100.dp),
+        contentPadding = PaddingValues(top = topPadding, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         if (appConfig.hasSecondProperty) {
@@ -7653,7 +7674,7 @@ fun WhatIfScenarioScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 150.dp),
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         // ====================================================================
@@ -7764,21 +7785,27 @@ fun WhatIfScenarioScreen(
                 elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
             ) {
                 Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    // Header + Timeframe Selector Pills
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
+                    // Header + Timeframe Selector Pills (Responsive for wide Folds and narrow Flips)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text("Projected Net Worth", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
-                            Text("In $horizonYears Years (Today: ${maskVal(baseNetWorth, 0)})", fontSize = 11.sp, color = SlateGray)
+                            Text("In $horizonYears Years", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold, color = BrandCoralPink)
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Baseline Today: ${maskVal(baseNetWorth, 0)}", fontSize = 11.sp, color = SlateGray)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
                             listOf(5, 10, 15, 20, 30).forEach { yrs ->
                                 val selected = horizonYears == yrs
                                 Surface(
                                     modifier = Modifier
+                                        .weight(1f)
                                         .clip(RoundedCornerShape(8.dp))
                                         .clickable { onHorizonYearsChange(yrs) },
                                     shape = RoundedCornerShape(8.dp),
@@ -7788,8 +7815,11 @@ fun WhatIfScenarioScreen(
                                         text = "${yrs}Y",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.ExtraBold,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 1,
+                                        softWrap = false,
                                         color = if (selected) BrandForestDark else MaterialTheme.colorScheme.onSurface,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                                        modifier = Modifier.padding(vertical = 6.dp)
                                     )
                                 }
                             }
@@ -7804,17 +7834,21 @@ fun WhatIfScenarioScreen(
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                         ) {
                             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("STATUS QUO", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = SlateGray)
+                                Text("STATUS QUO", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = SlateGray, maxLines = 1, softWrap = false)
                                 Text(
                                     maskVal(endPathANetWorth, 0),
-                                    fontSize = 17.sp,
+                                    fontSize = 16.sp,
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     "Surplus: ${maskVal(baseSurplusWeekly, 0)}/wk",
                                     fontSize = 11.sp,
-                                    color = SlateGray
+                                    color = SlateGray,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -7832,18 +7866,22 @@ fun WhatIfScenarioScreen(
                             border = BorderStroke(1.5.dp, planAccent)
                         ) {
                             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("WHAT-IF PLAN", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = planHeaderColor)
+                                Text("WHAT-IF PLAN", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = planHeaderColor, maxLines = 1, softWrap = false)
                                 Text(
                                     maskVal(endPathBNetWorth, 0),
-                                    fontSize = 17.sp,
+                                    fontSize = 16.sp,
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = planValueColor
+                                    color = planValueColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     "Surplus: ${maskVal(simulatedWeeklySurplusNow, 0)}/wk",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = planSubColor
+                                    color = planSubColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
@@ -7871,20 +7909,24 @@ fun WhatIfScenarioScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                                 Text(
                                     if (abs(netWorthDifference) < 1.0) "No changes active yet"
                                     else if (netWorthDifference > 0) "Net Wealth Gain in $horizonYears Yrs"
                                     else "Net Wealth Cost in $horizonYears Yrs",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     if (abs(weeklyCashflowDeltaNow) < 0.5) "Weekly cashflow unchanged"
                                     else "Weekly cashflow: ${if (weeklyCashflowDeltaNow > 0) "+" else ""}${maskVal(weeklyCashflowDeltaNow, 0)}/wk",
                                     fontSize = 11.sp,
-                                    color = SlateGray
+                                    color = SlateGray,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                             Text(
@@ -7892,7 +7934,9 @@ fun WhatIfScenarioScreen(
                                 else "${if (netWorthDifference > 0) "+" else ""}${maskVal(netWorthDifference, 0)}",
                                 fontWeight = FontWeight.ExtraBold,
                                 fontSize = 17.sp,
-                                color = diffColor
+                                color = diffColor,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -9001,15 +9045,22 @@ private fun WhatIfTrajectoryChart(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Wealth Trajectory (Now → Yr $horizonYears)", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SlateGray)
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Wealth Trajectory",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = SlateGray,
+                    maxLines = 1,
+                    softWrap = false
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(SlateGray))
-                        Text("Status Quo", fontSize = 10.sp, color = SlateGray)
+                        Text("Status Quo", fontSize = 10.sp, color = SlateGray, maxLines = 1, softWrap = false)
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(planColor))
-                        Text("What-If Plan", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = planColor)
+                        Text("What-If Plan", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = planColor, maxLines = 1, softWrap = false)
                     }
                 }
             }
@@ -9500,7 +9551,7 @@ fun TotalWealthScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         // COMBINED NET WEALTH CARD
@@ -9843,7 +9894,7 @@ fun SuperAndSharesScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         item {
@@ -10316,7 +10367,7 @@ fun OtherAssetsScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = headerTopPad, bottom = 100.dp),
+        contentPadding = PaddingValues(top = headerTopPad, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         item {
@@ -11454,19 +11505,20 @@ fun FloatingAiAssistantWidget(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(bottom = 104.dp, end = 16.dp, start = 16.dp, top = 16.dp),
+            .navigationBarsPadding()
+            .padding(bottom = 90.dp, end = 12.dp, start = 12.dp, top = 16.dp),
         contentAlignment = Alignment.BottomEnd
     ) {
         if (!isExpanded) {
-            // Draggable Floating 3D Liquid Glass Orb Chatbot Button (no internal square box)
+            // Draggable Floating 3D Liquid Glass Orb Chatbot Button
             Surface(
                 onClick = { isExpanded = true },
                 shape = CircleShape,
-                color = Color.Transparent,
+                color = BrandForestDark.copy(alpha = 0.90f),
                 tonalElevation = 0.dp,
-                shadowElevation = 0.dp,
+                shadowElevation = 4.dp,
                 modifier = Modifier
-                    .size(60.dp)
+                    .size(52.dp)
                     .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
                     .liquidGlass(
                         shape = CircleShape,
