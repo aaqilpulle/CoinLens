@@ -1,21 +1,58 @@
 package com.example.expnz20
 
 import android.graphics.Bitmap
+import android.util.Log
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.Content
+import com.google.firebase.ai.type.GenerationConfig
+import com.google.firebase.ai.type.ThinkingLevel
 import com.google.firebase.ai.type.content
+import com.google.firebase.ai.type.generationConfig
+import com.google.firebase.ai.type.thinkingConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 data class ImportedShareItem(
     val ticker: String,
     val quantity: Double,
     val averagePrice: Double,
 )
+
+data class LearnedUserFact(
+    val id: String = UUID.randomUUID().toString(),
+    val category: String = "General", // "Goals", "History", "Preferences", "Personal", "Financial", "Milestones"
+    val fact: String,
+    val timestamp: Long = System.currentTimeMillis(),
+) {
+    fun toJson(): JSONObject {
+        val o = JSONObject()
+        o.put("id", id)
+        o.put("category", category)
+        o.put("fact", fact)
+        o.put("timestamp", timestamp)
+        return o
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject): LearnedUserFact {
+            return LearnedUserFact(
+                id = o.optString("id", UUID.randomUUID().toString()),
+                category = o.optString("category", "General"),
+                fact = o.optString("fact", ""),
+                timestamp = o.optLong("timestamp", System.currentTimeMillis()),
+            )
+        }
+    }
+}
 
 data class ChatMessage(
     val text: String,
@@ -24,7 +61,42 @@ data class ChatMessage(
     val attachedBitmap: Bitmap? = null,
     val attachedFileName: String? = null,
     val appliedActions: List<String> = emptyList(),
-)
+) {
+    fun toJson(): JSONObject {
+        val o = JSONObject()
+        o.put("text", text)
+        o.put("isFromUser", isFromUser)
+        o.put("timestamp", timestamp)
+        if (!attachedFileName.isNullOrBlank()) {
+            o.put("attachedFileName", attachedFileName)
+        }
+        if (appliedActions.isNotEmpty()) {
+            val arr = JSONArray()
+            appliedActions.forEach { arr.put(it) }
+            o.put("appliedActions", arr)
+        }
+        return o
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject): ChatMessage {
+            val arr = o.optJSONArray("appliedActions")
+            val actions = mutableListOf<String>()
+            if (arr != null) {
+                for (i in 0 until arr.length()) {
+                    actions.add(arr.optString(i))
+                }
+            }
+            return ChatMessage(
+                text = o.optString("text", ""),
+                isFromUser = o.optBoolean("isFromUser", false),
+                timestamp = o.optString("timestamp", SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())),
+                attachedFileName = if (o.has("attachedFileName")) o.optString("attachedFileName").takeIf { it.isNotBlank() } else null,
+                appliedActions = actions,
+            )
+        }
+    }
+}
 
 data class SubscriptionLeak(
     val merchant: String,
@@ -42,164 +114,551 @@ fun cleanMarkdownText(raw: String): String {
 
 object AiAssistantManager {
 
-    // Chat with Gemini Financial Assistant using Firebase AI SDK (Supports Text, Camera/Media Bitmaps, and Uploaded Files + Full Read/Write Actions)
+    private const val TAG = "AiAssistantManager"
+
+    // Supported active modern models in priority order
+    private val preferredModelCandidates = listOf(
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+    )
+
+    @Volatile
+    private var activeWorkingModel: String = "gemini-3.8-flash"
+
+    // Cooldown map to avoid retrying models that exhausted their free tier quota (e.g. 429) or do not exist (404)
+    private val modelCooldownUntil = ConcurrentHashMap<String, Long>()
+    private val modelsSupportingThinking = ConcurrentHashMap<String, Boolean>()
+
+    private fun isModelCoolingDown(modelName: String): Boolean {
+        val until = modelCooldownUntil[modelName] ?: return false
+        if (System.currentTimeMillis() > until) {
+            modelCooldownUntil.remove(modelName)
+            return false
+        }
+        return true
+    }
+
+    private fun markModelUnavailable(modelName: String, isPermanent: Boolean = false) {
+        val duration = if (isPermanent) Long.MAX_VALUE else (System.currentTimeMillis() + 6 * 60 * 60 * 1000L)
+        modelCooldownUntil[modelName] = duration
+        Log.w(TAG, "Model $modelName marked unavailable (permanent=$isPermanent) to preserve responsiveness")
+    }
+
+    private fun markModelQuotaExceeded(modelName: String) = markModelUnavailable(modelName, isPermanent = false)
+
+    private fun isQuotaOrNotFoundError(e: Exception): Boolean {
+        val msg = e.message?.lowercase() ?: ""
+        return msg.contains("quota") || msg.contains("429") || msg.contains("resource_exhausted") ||
+                msg.contains("404") || msg.contains("not found") || msg.contains("retired") ||
+                msg.contains("invalid") || msg.contains("unknown") || msg.contains("does not exist") ||
+                msg.contains("unregistered") || msg.contains("unsupported")
+    }
+
+    private fun getModelCandidates(): List<String> {
+        val available = preferredModelCandidates.filter { !isModelCoolingDown(it) }
+        val pool = if (available.isNotEmpty()) available else preferredModelCandidates
+        val active = activeWorkingModel
+        return if (!isModelCoolingDown(active) && pool.contains(active)) {
+            listOf(active) + pool.filter { it != active }
+        } else {
+            pool
+        }
+    }
+
+    private fun optimizeBitmapForAi(original: Bitmap, maxDimension: Int = 1024): Bitmap {
+        val width = original.width
+        val height = original.height
+        if (width <= maxDimension && height <= maxDimension) return original
+
+        val ratio = width.toFloat() / height.toFloat()
+        val targetWidth: Int
+        val targetHeight: Int
+        if (width > height) {
+            targetWidth = maxDimension
+            targetHeight = (maxDimension / ratio).toInt().coerceAtLeast(1)
+        } else {
+            targetHeight = maxDimension
+            targetWidth = (maxDimension * ratio).toInt().coerceAtLeast(1)
+        }
+        return Bitmap.createScaledBitmap(original, targetWidth, targetHeight, true)
+    }
+
+    private fun createFastChatConfig(level: ThinkingLevel = ThinkingLevel.MINIMAL): GenerationConfig {
+        return generationConfig {
+            temperature = 0.2f
+            maxOutputTokens = 900
+            try {
+                thinkingConfig = thinkingConfig {
+                    thinkingLevel = level
+                }
+            } catch (_: Throwable) {}
+        }
+    }
+
+    private fun createStandardChatConfig(): GenerationConfig {
+        return generationConfig {
+            temperature = 0.2f
+            maxOutputTokens = 900
+        }
+    }
+
+    private fun createFastJsonConfig(maxTokens: Int = 500): GenerationConfig {
+        return generationConfig {
+            temperature = 0.1f
+            maxOutputTokens = maxTokens
+            responseMimeType = "application/json"
+        }
+    }
+
+    private fun formatHistoryMessageForContext(msg: ChatMessage): String {
+        return buildString {
+            if (!msg.attachedFileName.isNullOrBlank()) {
+                append("[Attached File: ${msg.attachedFileName}] ")
+            }
+            if (msg.attachedBitmap != null) {
+                append("[Attached Image/Screenshot] ")
+            }
+            append(msg.text.trim())
+            if (msg.appliedActions.isNotEmpty()) {
+                append("\n[Applied App Actions: ${msg.appliedActions.joinToString("; ")}]")
+            }
+        }
+    }
+
+    private fun buildAlternatingHistoryContents(history: List<ChatMessage>): List<Content> {
+        val recent = history
+            .filter { (text, _, _, attachedBitmap, attachedFileName) ->
+                (text.isNotBlank()) || (attachedBitmap != null) || (!attachedFileName.isNullOrBlank())
+            }
+            .takeLast(10) // 10 recent turns ensures tight context and instant latency
+
+        val firstUserIdx = recent.indexOfFirst { it.isFromUser }
+        if (firstUserIdx < 0) return emptyList()
+        val trimmed = recent.subList(firstUserIdx, recent.size)
+
+        val coalesced = mutableListOf<Pair<String, String>>()
+        for (msg in trimmed) {
+            val role = if (msg.isFromUser) "user" else "model"
+            val formatted = formatHistoryMessageForContext(msg)
+            if (coalesced.isNotEmpty() && (coalesced.last().first == role)) {
+                val prev = coalesced.removeAt(coalesced.lastIndex)
+                coalesced.add(role to "${prev.second}\n\n$formatted")
+            } else {
+                coalesced.add(role to formatted)
+            }
+        }
+
+        if (coalesced.isNotEmpty() && (coalesced.last().first == "user")) {
+            coalesced.add("model" to "Understood. Please continue.")
+        }
+
+        return coalesced.map { (role, textBody) ->
+            content(role = role) {
+                text(textBody)
+            }
+        }
+    }
+
+    // Chat with Gemini Financial Assistant (supports real-time streaming to UI + automated lifelong memory)
     suspend fun askGeminiAssistant(
         prompt: String,
         contextSummary: String = "",
+        conversationHistory: List<ChatMessage> = emptyList(),
+        learnedFacts: List<LearnedUserFact> = emptyList(),
+        userProfileSummary: String = "",
+        longTermConversationDigest: String = "",
         bitmap: Bitmap? = null,
         fileContent: String? = null,
         fileName: String? = null,
+        onPartialText: (suspend (String) -> Unit)? = null,
     ): String = withContext(Dispatchers.IO) {
         try {
-            val aiModel = Firebase.ai.generativeModel("gemini-3.5-flash-lite")
-            val fullPrompt = buildString {
-                append("You are CoinBot, a professional Australian financial co-pilot embedded inside the COINLENS personal wealth and finance app.\n\n")
+            val systemInstructionText = buildString {
+                append("You are CoinBot, an elite Australian personal wealth strategist and financial co-pilot embedded inside the COINLENS app.\n\n")
+                append("CRITICAL: REAL-TIME WRITE ACCESS TO DASHBOARD TABS:\n")
+                append("Whenever the user asks you to add, edit, change, set, or delete ANY item or number (or confirms a change), you MUST append the exact [[ACTION:ACTION_TYPE|...]] tag at the VERY END of your reply.\n\n")
+                append("Supported ACTION_TYPEs:\n")
+                append("- Personal Income: [[ACTION:SET_INCOME|person=1|amount=1500]] (person=1 or 2, weekly $)\n")
+                append("- Personal Savings Goal: [[ACTION:SET_SAVINGS|person=1|amount=300]]\n")
+                append("- Personal / Household Expenses & Income: [[ACTION:ADD_CASHFLOW|target=person1|name=Groceries|weeklyAmount=-180|icon=Food]] (target=person1, person2, prop1, or prop2; negative for expense; icon=Receipt, Home, Food, Car, Shopping, Health, Utility, Entertainment)\n")
+                append("- Update Cashflow: [[ACTION:UPDATE_CASHFLOW|target=person1|name=Groceries|weeklyAmount=-200]]\n")
+                append("- Delete Cashflow: [[ACTION:DELETE_CASHFLOW|target=person1|name=Groceries]]\n")
+                append("- Property Value & Rent: [[ACTION:SET_PROPERTY_VALUE|property=1|value=850000]], [[ACTION:SET_PROPERTY_RENT|property=1|weeklyRent=650|isRented=true]], [[ACTION:SET_PROPERTY_NAME|property=1|name=12 Smith St]]\n")
+                append("- Property Bills: [[ACTION:ADD_PROPERTY_ITEM|property=1|name=Council Rates|weeklyAmount=-45]], [[ACTION:DELETE_PROPERTY_ITEM|property=1|name=Council Rates]]\n")
+                append("- Mortgage & Offset: [[ACTION:UPDATE_LOAN|property=1|startLoanBalance=450000|originalLoanAmount=500000|interestRatePa=6.15|offsetBalance=55000]]\n")
+                append("- Shares / ETFs: [[ACTION:ADD_SHARE|code=VAS|owner=Me|units=50|purchasePrice=95.0|currentPrice=108.57]], [[ACTION:UPDATE_SHARE|code=VAS|units=60|purchasePrice=96.0|currentPrice=108.57]], [[ACTION:DELETE_SHARE|code=VAS]]\n")
+                append("- Superannuation: [[ACTION:ADD_SUPER|fundName=AustralianSuper|owner=Me|balance=125000]], [[ACTION:UPDATE_SUPER|fundName=AustralianSuper|balance=130000]], [[ACTION:DELETE_SUPER|fundName=AustralianSuper]]\n")
+                append("- Other Assets: [[ACTION:ADD_OTHER_ASSET|name=Car|owner=Me|value=25000]], [[ACTION:UPDATE_OTHER_ASSET|name=Car|value=28000]], [[ACTION:DELETE_OTHER_ASSET|name=Car]]\n")
+                append("- Levers: [[ACTION:SET_WHAT_IF_LEVERS|horizonYears=15|extraSavingsWeekly=200|incomeGrowth1Weekly=100|incomeGrowth2Weekly=0|rateShockProp1=-0.5|rateShockProp2=-0.5|superBoostWeekly=100|rentalGrowthWeekly=50]], [[ACTION:RESET_LEVERS]]\n")
+                append("- Milestones: [[ACTION:ADD_MILESTONE|title=Buy Investment Property|category=PROPERTY|startYear=2|durationYears=25|weeklyCashflow=-150|assetImpact=750000|liabilityImpact=600000]], [[ACTION:DELETE_MILESTONE|title=Buy Investment Property]]\n")
+                append("- Profile: [[ACTION:UPDATE_PROFILE|person1Name=Alex|person2Name=Sam|isCoupleMode=true]]\n")
+                append("- Remember Fact: [[ACTION:REMEMBER_FACT|category=Goals|fact=Targeting $100k ETF portfolio by 2027]] (categories: Goals, History, Preferences, Personal, Financial, Milestones)\n")
+                append("- Forget Fact: [[ACTION:FORGET_FACT|query=Targeting $100k]]\n\n")
+                append("RULES: 1 yr = 52 wks. Monthly = weekly * 52 / 12. Direct, sharp, warm Australian financial expertise. No markdown asterisks or hashes.\n\n")
+
+                if (learnedFacts.isNotEmpty() || userProfileSummary.isNotBlank() || longTermConversationDigest.isNotBlank()) {
+                    append("====================================================================\n")
+                    append("PERMANENT USER MEMORY (AUTOMATICALLY LEARNED ACROSS ALL CONVERSATIONS):\n")
+                    if (learnedFacts.isNotEmpty()) {
+                        val grouped = learnedFacts.takeLast(20).groupBy { it.category }
+                        for ((cat, facts) in grouped) {
+                            append("• [$cat]:\n")
+                            facts.forEach { f -> append("   - ${f.fact}\n") }
+                        }
+                    }
+                    if (userProfileSummary.isNotBlank()) append("USER SUMMARY:\n$userProfileSummary\n")
+                    if (longTermConversationDigest.isNotBlank()) append("CONVERSATION DIGEST:\n$longTermConversationDigest\n")
+                    append("====================================================================\n\n")
+                }
+
+                append("AUTOMATIC CONTINUOUS LEARNING:\n")
+                append("Whenever the user shares any new fact about themselves (goals, career, family, preferences, history), remember it automatically and emit [[ACTION:REMEMBER_FACT|category=...|fact=...]] at the very end.\n\n")
+
                 if (contextSummary.isNotBlank()) {
-                    append("REAL-TIME UNMASKED APP FINANCIAL DATA (ALL CURRENT TABS & FUTURE PROJECTIONS):\n")
-                    append("$contextSummary\n\n")
+                    append("REAL-TIME APP FINANCIAL DATA:\n$contextSummary\n\n")
+                }
+            }
+
+            val historyContents = buildAlternatingHistoryContents(conversationHistory)
+
+            val userTurnPrompt = buildString {
+                if (historyContents.isEmpty() && conversationHistory.isNotEmpty()) {
+                    val relevantTurns = conversationHistory
+                        .filter { (it.text.isNotBlank()) || (it.attachedBitmap != null) || (!it.attachedFileName.isNullOrBlank()) }
+                        .takeLast(4)
+                    if (relevantTurns.isNotEmpty()) {
+                        append("RECENT CONVERSATION CONTEXT:\n")
+                        relevantTurns.forEach { msg ->
+                            val speaker = if (msg.isFromUser) "USER" else "COINBOT"
+                            append("[$speaker]: ${formatHistoryMessageForContext(msg)}\n")
+                        }
+                        append("\n")
+                    }
                 }
                 if (!fileName.isNullOrBlank() && !fileContent.isNullOrBlank()) {
-                    append("ATTACHED FILE UPLOADED BY USER ($fileName):\n")
-                    append("${fileContent.take(25000)}\n\n")
+                    append("ATTACHED FILE ($fileName):\n${fileContent.take(12000)}\n\n")
                 }
-                append("FULL READ & WRITE CAPABILITIES INSTRUCTIONS:\n")
-                append("1. You have complete read access to all current and future projected data across every tab in the app.\n")
-                append("2. You also have FULL WRITE ACCESS to create, edit, update, or delete any editable data in the app whenever the user asks you to make a change, log an item, update a number, adjust a What-If lever, or import data from a photo/receipt/screenshot/file.\n")
-                append("3. Whenever the user asks you to add, update, change, set, or delete any data, emit one or more action tags at the END of your response using this exact single-line format:\n")
-                append("   [[ACTION:ACTION_TYPE|key1=value1|key2=value2]]\n")
-                append("   Supported ACTION_TYPEs and keys:\n")
-                append("   - [[ACTION:SET_INCOME|person=1|amount=1500.0]] (person=1 or 2, weekly take-home income in $)\n")
-                append("   - [[ACTION:ADD_CASHFLOW|target=person1|name=Groceries|weeklyAmount=-180.0|icon=Food]] (target=person1, person2, prop1, or prop2; negative weeklyAmount for expense, positive for income; icon=Default, Home, Food, Car, Shopping, Health, Utility, Entertainment)\n")
-                append("   - [[ACTION:UPDATE_CASHFLOW|target=person1|name=Groceries|weeklyAmount=-200.0]]\n")
-                append("   - [[ACTION:DELETE_CASHFLOW|target=person1|name=Groceries]]\n")
-                append("   - [[ACTION:SET_PROPERTY_VALUE|property=1|value=850000]] (property=1 or 2)\n")
-                append("   - [[ACTION:SET_PROPERTY_RENT|property=1|weeklyRent=650|isRented=true]] (property=1 or 2)\n")
-                append("   - [[ACTION:SET_PROPERTY_NAME|property=1|name=12 Smith St]]\n")
-                append("   - [[ACTION:ENABLE_SECOND_PROPERTY|enabled=true]]\n")
-                append("   - [[ACTION:UPDATE_LOAN|property=1|startLoanBalance=450000|originalLoanAmount=500000|interestRatePa=6.15|offsetBalance=55000|startDateStr=2024-01-01]] (include only the keys to change for property=1 or 2)\n")
-                append("   - [[ACTION:ADD_SHARE|code=VAS|owner=Me|units=50|purchasePrice=95.0|currentPrice=108.57]]\n")
-                append("   - [[ACTION:UPDATE_SHARE|code=VAS|units=60|purchasePrice=96.0|currentPrice=108.57]]\n")
-                append("   - [[ACTION:DELETE_SHARE|code=VAS]]\n")
-                append("   - [[ACTION:ADD_SUPER|fundName=AustralianSuper|owner=Me|balance=125000]]\n")
-                append("   - [[ACTION:UPDATE_SUPER|fundName=AustralianSuper|balance=130000]]\n")
-                append("   - [[ACTION:DELETE_SUPER|fundName=AustralianSuper]]\n")
-                append("   - [[ACTION:ADD_OTHER_ASSET|name=Emergency Fund|owner=Me|value=25000]]\n")
-                append("   - [[ACTION:UPDATE_OTHER_ASSET|name=Emergency Fund|value=30000]]\n")
-                append("   - [[ACTION:DELETE_OTHER_ASSET|name=Emergency Fund]]\n")
-                append("   - [[ACTION:SET_WHAT_IF_LEVERS|horizonYears=15|extraSavingsWeekly=200|rateShockProp1=-0.5|rateShockProp2=-0.5|superBoostWeekly=100|rentalGrowthWeekly=50]] (include any levers to update)\n")
-                append("   - [[ACTION:ADD_CUSTOM_LEVER|title=Side Hustle|impactType=WEEKLY_CASHFLOW|value=150|min=-200|max=1000|step=25]] (impactType: WEEKLY_CASHFLOW, ANNUAL_ASSET_CHANGE, LUMP_SUM_OFFSET, or INTEREST_RATE_DELTA)\n")
-                append("   - [[ACTION:UPDATE_CUSTOM_LEVER|title=Side Hustle|value=250]]\n")
-                append("   - [[ACTION:DELETE_CUSTOM_LEVER|title=Side Hustle]]\n")
-                append("   - [[ACTION:ADD_MILESTONE|title=Buy Investment Property|category=PROPERTY|startYear=2|durationYears=25|weeklyCashflow=-150|assetImpact=750000|liabilityImpact=600000]] (category: PROPERTY, CAREER, PURCHASE, INVESTMENT)\n")
-                append("   - [[ACTION:DELETE_MILESTONE|title=Buy Investment Property]]\n")
-                append("   - [[ACTION:CLEAR_MILESTONES]]\n")
-                append("   - [[ACTION:UPDATE_PROFILE|person1Name=Alex|person2Name=Sam|isCoupleMode=true]]\n")
-                append("4. Always use exact numbers from the context summary. Keep your explanation clear, concise, and helpful. Do not use markdown hashtags (#) or asterisks (*).\n\n")
-                append("User message: $prompt")
+                append("CURRENT USER MESSAGE:\n$prompt\n\n")
+                append("[DIRECTIVE: If confirming or applying changes/facts, emit the exact [[ACTION:ACTION_TYPE|...]] tag at the very end.]")
             }
-            val response = if (bitmap != null) {
-                aiModel.generateContent(
-                    content {
-                        image(bitmap)
-                        text(fullPrompt)
-                    },
-                )
-            } else {
-                aiModel.generateContent(fullPrompt)
+
+            val optimizedBitmap = bitmap?.let { optimizeBitmapForAi(it) }
+            val currentTurnContent = content(role = "user") {
+                optimizedBitmap?.let { image(it) }
+                text(userTurnPrompt)
             }
-            val rawText = response.text ?: "I'm sorry, I couldn't generate a response at this moment."
-            return@withContext cleanMarkdownText(rawText)
+            val inputList = if (historyContents.isNotEmpty()) historyContents + currentTurnContent else listOf(currentTurnContent)
+            val combinedFallbackPrompt = "$systemInstructionText\n\n$userTurnPrompt"
+
+            var lastError: Exception? = null
+            for (modelName in getModelCandidates()) {
+                val canTryThinking = modelsSupportingThinking[modelName] != false
+
+                // Attempt 1: Ultra-fast streaming with minimal thinking (if supported)
+                if (canTryThinking) {
+                    try {
+                        val aiModel = Firebase.ai.generativeModel(
+                            modelName = modelName,
+                            generationConfig = createFastChatConfig(ThinkingLevel.MINIMAL),
+                            systemInstruction = content { text(systemInstructionText) },
+                        )
+                        val buffer = StringBuilder()
+                        if (onPartialText != null) {
+                            aiModel.generateContentStream(inputList).collect { chunk ->
+                                val text = chunk.text
+                                if (!text.isNullOrEmpty()) {
+                                    buffer.append(text)
+                                    onPartialText.invoke(buffer.toString())
+                                }
+                            }
+                        } else {
+                            val response = aiModel.generateContent(inputList)
+                            buffer.append(response.text ?: "")
+                        }
+                        val rawText = buffer.toString()
+                        if (rawText.isNotBlank()) {
+                            activeWorkingModel = modelName
+                            modelsSupportingThinking[modelName] = true
+                            return@withContext cleanMarkdownText(rawText)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Model $modelName minimal thinking failed: ${e.message}")
+                        lastError = e
+                        val msg = e.message?.lowercase() ?: ""
+                        val isThinkingIssue = msg.contains("thinking") || msg.contains("generationconfig")
+                        if (isThinkingIssue) {
+                            modelsSupportingThinking[modelName] = false
+                            // Fall through to Attempt 2 for this model without thinkingConfig
+                        } else {
+                            val isPermanent = msg.contains("404") || msg.contains("not found") || msg.contains("invalid") || msg.contains("retired")
+                            markModelUnavailable(modelName, isPermanent = isPermanent)
+                            continue // Move immediately to next candidate!
+                        }
+                    }
+                }
+
+                // Attempt 2: Standard fast configuration (bounded tokens, low temperature, no thinkingConfig)
+                try {
+                    val aiModel = Firebase.ai.generativeModel(
+                        modelName = modelName,
+                        generationConfig = createStandardChatConfig(),
+                        systemInstruction = content { text(systemInstructionText) },
+                    )
+                    val buffer = StringBuilder()
+                    if (onPartialText != null) {
+                        aiModel.generateContentStream(inputList).collect { chunk ->
+                            val text = chunk.text
+                            if (!text.isNullOrEmpty()) {
+                                buffer.append(text)
+                                onPartialText.invoke(buffer.toString())
+                            }
+                        }
+                    } else {
+                        val response = aiModel.generateContent(inputList)
+                        buffer.append(response.text ?: "")
+                    }
+                    val rawText = buffer.toString()
+                    if (rawText.isNotBlank()) {
+                        activeWorkingModel = modelName
+                        return@withContext cleanMarkdownText(rawText)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Model $modelName standard chat config failed: ${e.message}")
+                    lastError = e
+                    val msg = e.message?.lowercase() ?: ""
+                    val isPermanent = msg.contains("404") || msg.contains("not found") || msg.contains("invalid") || msg.contains("retired")
+                    markModelUnavailable(modelName, isPermanent = isPermanent)
+                    continue
+                }
+            }
+
+            return@withContext "Error communicating with Gemini AI: ${lastError?.localizedMessage ?: "No response from model"}"
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error in askGeminiAssistant: ${e.message}", e)
             return@withContext "Error communicating with Gemini AI: ${e.localizedMessage ?: "Unknown error"}"
         }
+    }
+
+    // Continuously learn and extract facts about the user and user history from conversation turns
+    suspend fun extractLearnedFactsFromTurn(
+        userMessage: String,
+        aiReply: String,
+        existingFacts: List<LearnedUserFact>,
+    ): List<LearnedUserFact> = withContext(Dispatchers.IO) {
+        if (userMessage.trim().length < 4) return@withContext emptyList()
+        val existingSummary = existingFacts.takeLast(15).joinToString("; ") { "[${it.category}] ${it.fact}" }
+        val prompt = """
+            Analyze this conversation turn between an Australian user and CoinBot (wealth advisor).
+            User said: "$userMessage"
+            CoinBot replied: "$aiReply"
+            Known facts already remembered: "$existingSummary"
+
+            Extract any NEW facts or details revealed about the user themselves:
+            - Their career, occupation, job changes, income history, or earnings
+            - Their family, relationship status, children, partner, living situation
+            - Their financial goals (property purchase, investing targets, retirement, savings, travel, wedding)
+            - Their past financial history, past decisions, milestones, life events
+            - Their financial habits, risk appetite, preferred investments (e.g. ETFs, offset)
+
+            Rules:
+            - Only extract facts stated or confirmed by the USER, not bot speculations or generic advice.
+            - Do not duplicate facts already in 'Known facts'.
+            - Return ONLY a valid JSON array of objects with keys:
+              "category": string (one of "Goals", "History", "Preferences", "Personal", "Financial", "Milestones")
+              "fact": string (concise, factual summary)
+            - If no new user facts were revealed, return []
+            No markdown, no backticks, just raw JSON array.
+        """.trimIndent()
+
+        val candidates = getModelCandidates()
+        for (modelName in candidates) {
+            try {
+                val aiModel = Firebase.ai.generativeModel(
+                    modelName = modelName,
+                    generationConfig = createFastJsonConfig(350),
+                )
+                val response = aiModel.generateContent(prompt)
+                val raw = response.text ?: continue
+                val clean = raw.replace("```json", "").replace("```", "").trim()
+                if (clean.isBlank() || clean == "[]") return@withContext emptyList()
+                val arr = JSONArray(clean)
+                val extracted = mutableListOf<LearnedUserFact>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val cat = o.optString("category", "General").trim()
+                    val fact = o.optString("fact", "").trim()
+                    if (fact.isNotBlank()) {
+                        extracted.add(LearnedUserFact(category = cat, fact = fact))
+                    }
+                }
+                activeWorkingModel = modelName
+                return@withContext extracted
+            } catch (e: Exception) {
+                Log.w(TAG, "extractLearnedFacts failed on $modelName: ${e.message}")
+                if (isQuotaOrNotFoundError(e)) {
+                    markModelQuotaExceeded(modelName)
+                }
+            }
+        }
+        return@withContext emptyList()
+    }
+
+    // Synthesize dense long-term conversation digest across older conversation turns
+    suspend fun synthesizeConversationDigest(
+        olderMessages: List<ChatMessage>,
+        currentDigest: String,
+    ): String = withContext(Dispatchers.IO) {
+        if (olderMessages.isEmpty()) return@withContext currentDigest
+        val transcript = olderMessages.takeLast(10).joinToString("\n") { msg ->
+            val role = if (msg.isFromUser) "User" else "CoinBot"
+            "$role: ${msg.text.take(180)}"
+        }
+        val prompt = """
+            You are the memory engine for CoinBot, an Australian wealth advisor.
+            Existing long-term conversation memory digest:
+            "$currentDigest"
+
+            New historical conversation turns to assimilate:
+            "$transcript"
+
+            Synthesize an updated, compact chronological digest of all previous conversations.
+            Capture:
+            - Key financial decisions made or agreed upon
+            - Questions asked and advice provided
+            - Financial milestones explored
+            - Important life events or context discussed
+            Keep it dense, bulleted, clear, and high signal. Maximum 350 words.
+        """.trimIndent()
+
+        val candidates = getModelCandidates()
+        for (modelName in candidates) {
+            try {
+                val aiModel = Firebase.ai.generativeModel(
+                    modelName = modelName,
+                    generationConfig = createStandardChatConfig(),
+                )
+                val resp = aiModel.generateContent(prompt)
+                val text = resp.text
+                if (!text.isNullOrBlank()) {
+                    activeWorkingModel = modelName
+                    return@withContext cleanMarkdownText(text)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "synthesizeConversationDigest failed on $modelName: ${e.message}")
+                if (isQuotaOrNotFoundError(e)) {
+                    markModelQuotaExceeded(modelName)
+                }
+            }
+        }
+        return@withContext currentDigest
     }
 
     // Intelligent Subscription & Money Leak Detector
     suspend fun detectSubscriptionLeaks(expensesContext: String): List<SubscriptionLeak> = withContext(Dispatchers.IO) {
         if (expensesContext.isBlank()) return@withContext emptyList()
-        try {
-            val aiModel = Firebase.ai.generativeModel("gemini-3.5-flash-lite")
-            val prompt = """
-                Analyze this list of past expenses and bank statements: "$expensesContext".
-                Scan for recurring subscriptions, hidden memberships, streaming services, or duplicate charges.
-                Return ONLY a valid JSON array of objects with these exact keys:
-                - "merchant": string (e.g. "Netflix", "Gym Membership")
-                - "monthlyAmount": number (estimated monthly cost)
-                - "annualImpact": number (monthlyAmount * 12)
-                - "category": string (e.g. "Subscription", "Entertainment", "Fitness")
-                No markdown formatting, no backticks, just the raw JSON array. If none found, return [].
-            """.trimIndent()
+        val prompt = """
+            Analyze this list of past expenses and bank statements: "$expensesContext".
+            Scan for recurring subscriptions, hidden memberships, streaming services, or duplicate charges.
+            Return ONLY a valid JSON array of objects with these exact keys:
+            - "merchant": string (e.g. "Netflix", "Gym Membership")
+            - "monthlyAmount": number (estimated monthly cost)
+            - "annualImpact": number (monthlyAmount * 12)
+            - "category": string (e.g. "Subscription", "Entertainment", "Fitness")
+            No markdown formatting, no backticks, just the raw JSON array. If none found, return [].
+        """.trimIndent()
 
-            val response = aiModel.generateContent(prompt)
-            val rawText = response.text ?: return@withContext emptyList()
-            val cleanJson = rawText.replace("```json", "").replace("```", "").trim()
-            val jsonArray = JSONArray(cleanJson)
-            val results = mutableListOf<SubscriptionLeak>()
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                val monthly = obj.optDouble("monthlyAmount", 0.0)
-                results.add(
-                    SubscriptionLeak(
-                        merchant = obj.optString("merchant", "Unknown"),
-                        monthlyAmount = monthly,
-                        annualImpact = obj.optDouble("annualImpact", monthly * 12.0),
-                        category = obj.optString("category", "Subscription"),
-                    ),
+        val candidates = getModelCandidates()
+        for (modelName in candidates) {
+            try {
+                val aiModel = Firebase.ai.generativeModel(
+                    modelName = modelName,
+                    generationConfig = createFastJsonConfig(600),
                 )
+                val response = aiModel.generateContent(prompt)
+                val rawText = response.text ?: continue
+                val cleanJson = rawText.replace("```json", "").replace("```", "").trim()
+                val jsonArray = JSONArray(cleanJson)
+                val results = mutableListOf<SubscriptionLeak>()
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.getJSONObject(i)
+                    val monthly = obj.optDouble("monthlyAmount", 0.0)
+                    results.add(
+                        SubscriptionLeak(
+                            merchant = obj.optString("merchant", "Unknown"),
+                            monthlyAmount = monthly,
+                            annualImpact = obj.optDouble("annualImpact", monthly * 12.0),
+                            category = obj.optString("category", "Subscription"),
+                        ),
+                    )
+                }
+                activeWorkingModel = modelName
+                return@withContext results
+            } catch (e: Exception) {
+                Log.w(TAG, "detectSubscriptionLeaks failed on $modelName: ${e.message}")
+                if (isQuotaOrNotFoundError(e)) {
+                    markModelQuotaExceeded(modelName)
+                }
             }
-            return@withContext results
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return@withContext emptyList()
         }
+        return@withContext emptyList()
     }
 
     // Parse Portfolio Screenshots using Firebase AI
     suspend fun parsePearlerScreenshotWithAi(bitmap: Bitmap): List<ImportedShareItem> = withContext(Dispatchers.IO) {
-        try {
-            val aiModel = Firebase.ai.generativeModel("gemini-3.5-flash-lite")
+        val prompt = """
+            Analyze this screenshot of an investment/shares portfolio containing multiple shares.
+            Extract every individual stock holding visible in the image.
+            Return ONLY a valid JSON array of objects with these exact keys:
+            - "ticker": string (e.g., "VAS", "VDHG", "AAPL")
+            - "quantity": number (total units or shares held)
+            - "averagePrice": number (price shown, or 0.0 if not available)
+            No markdown formatting, no backticks, just the raw JSON array. If this is not a shares portfolio screenshot, return [].
+        """.trimIndent()
 
-            val prompt = """
-                Analyze this screenshot of an investment/shares portfolio containing multiple shares.
-                Extract every individual stock holding visible in the image.
-                Return ONLY a valid JSON array of objects with these exact keys:
-                - "ticker": string (e.g., "VAS", "VDHG", "AAPL")
-                - "quantity": number (total units or shares held)
-                - "averagePrice": number (price shown, or 0.0 if not available)
-                No markdown formatting, no backticks, just the raw JSON array. If this is not a shares portfolio screenshot, return [].
-            """.trimIndent()
+        val optimized = optimizeBitmapForAi(bitmap)
+        val inputContent = content {
+            image(optimized)
+            text(prompt)
+        }
 
-            val inputContent = content {
-                image(bitmap)
-                text(prompt)
-            }
+        val candidates = getModelCandidates()
+        for (modelName in candidates) {
+            try {
+                val aiModel = Firebase.ai.generativeModel(
+                    modelName = modelName,
+                    generationConfig = createFastJsonConfig(700),
+                )
+                val response = aiModel.generateContent(inputContent)
+                val rawText = response.text ?: continue
 
-            val response = aiModel.generateContent(inputContent)
-            val rawText = response.text ?: return@withContext emptyList()
+                val cleanJsonStr = rawText.replace("```json", "").replace("```", "").trim()
+                val jsonArray = JSONArray(cleanJsonStr)
+                val results = mutableListOf<ImportedShareItem>()
 
-            val cleanJsonStr = rawText.replace("```json", "").replace("```", "").trim()
-            val jsonArray = JSONArray(cleanJsonStr)
-            val results = mutableListOf<ImportedShareItem>()
-
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                val ticker = obj.optString("ticker", "").trim()
-                val qty = obj.optDouble("quantity", 0.0)
-                if ((ticker.isNotBlank()) && (qty > 0.0)) {
-                    results.add(
-                        ImportedShareItem(
-                            ticker = ticker,
-                            quantity = qty,
-                            averagePrice = obj.optDouble("averagePrice", 0.0),
-                        ),
-                    )
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.getJSONObject(i)
+                    val ticker = obj.optString("ticker", "").trim()
+                    val qty = obj.optDouble("quantity", 0.0)
+                    if (ticker.isNotBlank() && qty > 0.0) {
+                        results.add(
+                            ImportedShareItem(
+                                ticker = ticker,
+                                quantity = qty,
+                                averagePrice = obj.optDouble("averagePrice", 0.0),
+                            ),
+                        )
+                    }
+                }
+                activeWorkingModel = modelName
+                return@withContext results
+            } catch (e: Exception) {
+                Log.w(TAG, "parsePearlerScreenshotWithAi failed on $modelName: ${e.message}")
+                if (isQuotaOrNotFoundError(e)) {
+                    markModelQuotaExceeded(modelName)
                 }
             }
-            return@withContext results
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return@withContext emptyList()
         }
+        return@withContext emptyList()
     }
 }
