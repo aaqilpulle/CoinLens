@@ -57,9 +57,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import kotlin.time.Duration.Companion.milliseconds
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -68,8 +66,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -101,7 +103,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
@@ -110,6 +114,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
@@ -138,8 +143,8 @@ fun Context.getActivity(): Activity? {
 // BRAND LOGO COLOR PALETTE (DEEP FOREST EMERALD & CORAL ROSE)
 // ============================================================================
 val BrandForestDark = Color(0xFF04140E)      // Deep dark emerald forest app background & contrast color
-val BrandForestSurface = Color(0xFF0A221A)   // Rich dark forest card surface
-val BrandForestVariant = Color(0xFF103025)   // Highlighted dark forest container
+val BrandForestSurface = Color(0xFF071B14)   // Rich deeper dark forest card surface
+val BrandForestVariant = Color(0xFF0C241C)   // Highlighted dark forest container
 val BrandCoralPink = Color(0xFFE38391)       // Exact Coral Rose from logo wallet & arrow
 val BrandCoralLight = Color(0xFFF3A6B2)      // Soft Rose highlight
 val BrandMintGreen = Color(0xFF34D399)       // Accessible Mint Green (Inflow / Positive)
@@ -286,6 +291,18 @@ class LiquidScrollBoundaryState {
     }
 }
 
+@Stable
+class OrbRevealState {
+    var activeOrbKey by mutableStateOf<Any?>(null)
+    var activeActionTrayBounds by mutableStateOf<Rect?>(null)
+
+    fun dismiss() {
+        activeOrbKey = null
+        activeActionTrayBounds = null
+    }
+}
+
+val LocalOrbRevealState = staticCompositionLocalOf { OrbRevealState() }
 val LocalLiquidScrollBoundary = staticCompositionLocalOf { LiquidScrollBoundaryState() }
 val LocalOnHorizontalChildTouchChange = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
 
@@ -310,7 +327,6 @@ fun Modifier.lockPagerOnTouch(): Modifier {
     }
 }
 
-@Composable
 fun Modifier.liquidGlass(
     shape: Shape = RoundedCornerShape(22.dp),
     tintColor: Color = BrandForestSurface,
@@ -318,68 +334,51 @@ fun Modifier.liquidGlass(
     accentRimColor: Color = BrandCoralPink,
     role: LiquidGlassRole = LiquidGlassRole.ORB
 ): Modifier {
-    val isHeader = role == LiquidGlassRole.HEADER
-    val isFooter = role == LiquidGlassRole.FOOTER
-    val boundaryState = if (isHeader || isFooter) LocalLiquidScrollBoundary.current else null
+    val shouldClip = role == LiquidGlassRole.HEADER || role == LiquidGlassRole.FOOTER
+    val baseModifier = if (shouldClip) this.clip(shape) else this
 
-    val baseModifier = if (boundaryState != null) {
-        this.onGloballyPositioned { coords ->
-            if (!coords.isAttached) return@onGloballyPositioned
-            val b = coords.boundsInRoot()
-            if (isHeader) {
-                if (abs(boundaryState.headerBottomPx - b.bottom) > 0.5f) boundaryState.headerBottomPx = b.bottom
-            } else {
-                if (abs(boundaryState.footerTopPx - b.top) > 0.5f) boundaryState.footerTopPx = b.top
-            }
+    return baseModifier.drawWithCache {
+        val outline = shape.createOutline(size, layoutDirection, this)
+        val safeIntensity = intensity.coerceIn(0.65f, 1.5f)
+        val strokePx = 1.25.dp.toPx()
+        val solidTint = tintColor.copy(alpha = 1f)
+
+        val frostBrush = Brush.verticalGradient(
+            colors = listOf(
+                solidTint.copy(alpha = (0.88f * safeIntensity).coerceIn(0.80f, 0.96f)),
+                solidTint.copy(alpha = (0.82f * safeIntensity).coerceIn(0.75f, 0.93f))
+            ),
+            startY = 0f,
+            endY = size.height
+        )
+
+        val meniscusHighlight = Brush.verticalGradient(
+            colors = listOf(
+                Color.White.copy(alpha = (0.12f * safeIntensity).coerceIn(0f, 0.20f)),
+                Color.Transparent
+            ),
+            startY = 0f,
+            endY = (size.height * 0.30f).coerceAtLeast(1f)
+        )
+
+        val rimBrush = Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = (0.65f * safeIntensity).coerceIn(0f, 0.90f)),
+                Color.White.copy(alpha = (0.18f * safeIntensity).coerceIn(0f, 0.40f)),
+                accentRimColor.copy(alpha = (0.55f * safeIntensity).coerceIn(0f, 0.85f)),
+                Color.White.copy(alpha = (0.35f * safeIntensity).coerceIn(0f, 0.70f))
+            ),
+            start = Offset.Zero,
+            end = Offset(size.width, size.height)
+        )
+
+        onDrawWithContent {
+            drawOutline(outline = outline, brush = frostBrush)
+            drawOutline(outline = outline, brush = meniscusHighlight)
+            drawContent()
+            drawOutline(outline = outline, brush = rimBrush, style = Stroke(width = strokePx))
         }
-    } else {
-        this
     }
-
-    return baseModifier
-        .clip(shape)
-        .drawWithCache {
-            val outline = shape.createOutline(size, layoutDirection, this)
-            val safeIntensity = intensity.coerceIn(0.65f, 1.5f)
-            val strokePx = 1.25.dp.toPx()
-            val solidTint = tintColor.copy(alpha = 1f)
-
-            val frostBrush = Brush.verticalGradient(
-                colors = listOf(
-                    solidTint.copy(alpha = (0.88f * safeIntensity).coerceIn(0.80f, 0.96f)),
-                    solidTint.copy(alpha = (0.82f * safeIntensity).coerceIn(0.75f, 0.93f))
-                ),
-                startY = 0f,
-                endY = size.height
-            )
-
-            val meniscusHighlight = Brush.verticalGradient(
-                colors = listOf(
-                    Color.White.copy(alpha = (0.12f * safeIntensity).coerceIn(0f, 0.20f)),
-                    Color.Transparent
-                ),
-                startY = 0f,
-                endY = (size.height * 0.30f).coerceAtLeast(1f)
-            )
-
-            val rimBrush = Brush.linearGradient(
-                colors = listOf(
-                    Color.White.copy(alpha = (0.65f * safeIntensity).coerceIn(0f, 0.90f)),
-                    Color.White.copy(alpha = (0.18f * safeIntensity).coerceIn(0f, 0.40f)),
-                    accentRimColor.copy(alpha = (0.55f * safeIntensity).coerceIn(0f, 0.85f)),
-                    Color.White.copy(alpha = (0.35f * safeIntensity).coerceIn(0f, 0.70f))
-                ),
-                start = Offset.Zero,
-                end = Offset(size.width, size.height)
-            )
-
-            onDrawWithContent {
-                drawOutline(outline = outline, brush = frostBrush)
-                drawOutline(outline = outline, brush = meniscusHighlight)
-                drawContent()
-                drawOutline(outline = outline, brush = rimBrush, style = Stroke(width = strokePx))
-            }
-        }
 }
 
 @Composable
@@ -400,7 +399,7 @@ fun Card(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
-    val defaultTint = if (isDark) Color(0xFF0E2F29) else Color(0xFFF7FBF9)
+    val defaultTint = if (isDark) Color(0xFF09221D) else Color(0xFFF7FBF9)
     val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
         when {
             colors.containerColor.alpha < 0.70f -> {
@@ -462,7 +461,7 @@ fun Card(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
-    val defaultTint = if (isDark) Color(0xFF0C2A25) else Color(0xFFF4FAF7)
+    val defaultTint = if (isDark) Color(0xFF081E19) else Color(0xFFF4FAF7)
     val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
         when {
             colors.containerColor.alpha < 0.70f -> {
@@ -923,7 +922,7 @@ enum class AppSection(
     WHAT_IF("Scenario Simulator", "What-If", Icons.Default.Science),
     SETTINGS("Settings", "Settings", Icons.Default.Settings);
 
-    fun getColor(appConfig: UserAppConfig): Color {
+    fun getColor(): Color {
         return when (this) {
             TOTAL_WEALTH -> BrandWarmAmber
             CASH_FLOW -> BrandMintGreen
@@ -937,14 +936,128 @@ enum class AppSection(
     }
 }
 
+enum class BillingCycle(
+    val label: String,
+    val cycleDays: Long,
+    val cycleWeeks: Double
+) {
+    WEEKLY("Weekly", 7L, 1.0),
+    FORTNIGHTLY("Fortnight", 14L, 2.0),
+    MONTHLY("Monthly", 30L, 52.0 / 12.0),
+    QUARTERLY("Quarterly", 91L, 13.0),
+    SIX_MONTHLY("6-Monthly", 182L, 26.0),
+    ANNUAL("Annual", 365L, 52.0);
+
+    companion object {
+        fun fromName(raw: String?): BillingCycle {
+            if (raw.isNullOrBlank()) return WEEKLY
+            val clean = raw.trim()
+            return entries.firstOrNull {
+                it.name.equals(clean, ignoreCase = true) ||
+                    it.label.equals(clean, ignoreCase = true) ||
+                    (it == ANNUAL && clean.equals("Yearly", ignoreCase = true)) ||
+                    (it == FORTNIGHTLY && clean.equals("Fortnightly", ignoreCase = true))
+            } ?: WEEKLY
+        }
+    }
+}
+
+private val CachedSystemZoneId: ZoneId = ZoneId.systemDefault()
+
+@Immutable
 data class CashflowItem(
     val id: String,
     val name: String,
     val weeklyAmount: Double,
     val isLockedMortgageOrPropertyLink: Boolean = false,
     val iconName: String = "Default",
-    val customSubtitle: String? = null
-)
+    val customSubtitle: String? = null,
+    val billingCycle: BillingCycle = BillingCycle.WEEKLY,
+    val nextDueDateEpochMillis: Long? = null,
+    val linkedAssetId: String? = null
+) {
+    val cycleDays: Long = billingCycle.cycleDays.coerceAtLeast(1L)
+
+    val cycleWeeks: Double = billingCycle.cycleWeeks
+
+    val isBatteryEnabled: Boolean = billingCycle != BillingCycle.WEEKLY &&
+        nextDueDateEpochMillis != null &&
+        nextDueDateEpochMillis > 0L &&
+        weeklyAmount < 0.0 &&
+        !isLockedMortgageOrPropertyLink
+
+    val cycleTargetAmount: Double = abs(weeklyAmount) * cycleWeeks
+
+    @Transient
+    private val rawInitialDueDate: LocalDate? = if (nextDueDateEpochMillis != null && nextDueDateEpochMillis > 0L) {
+        try {
+            Instant.ofEpochMilli(nextDueDateEpochMillis).atZone(CachedSystemZoneId).toLocalDate()
+        } catch (_: Exception) {
+            null
+        }
+    } else {
+        null
+    }
+
+    @Transient
+    private var cachedTodayEpochDay: Long = Long.MIN_VALUE
+
+    @Transient
+    private var cachedResolvedDueDate: LocalDate? = null
+
+    @Transient
+    private var cachedDaysUntilDue: Long = 0L
+
+    private fun ensureCycleDateCache() {
+        val initialDue = rawInitialDueDate ?: return
+        val todayEpochDay = System.currentTimeMillis() / 86_400_000L
+        if (cachedTodayEpochDay == todayEpochDay && cachedResolvedDueDate != null) return
+        val today = LocalDate.now(CachedSystemZoneId)
+        var dueDate = initialDue
+        if (billingCycle != BillingCycle.WEEKLY && dueDate.isBefore(today)) {
+            val stepDays = cycleDays
+            val overdueDays = ChronoUnit.DAYS.between(dueDate, today)
+            val cyclesToAdvance = (overdueDays / stepDays) + 1L
+            dueDate = dueDate.plusDays(cyclesToAdvance * stepDays)
+            while (dueDate.isBefore(today)) {
+                dueDate = dueDate.plusDays(stepDays)
+            }
+        }
+        cachedTodayEpochDay = todayEpochDay
+        cachedResolvedDueDate = dueDate
+        cachedDaysUntilDue = ChronoUnit.DAYS.between(today, dueDate).coerceAtLeast(0L)
+    }
+
+    val nextDueDate: LocalDate?
+        get() {
+            if (rawInitialDueDate == null) return null
+            ensureCycleDateCache()
+            return cachedResolvedDueDate
+        }
+
+    val daysUntilDue: Long
+        get() {
+            if (rawInitialDueDate == null) return 0L
+            ensureCycleDateCache()
+            return cachedDaysUntilDue
+        }
+
+    val chargeProgress: Float
+        get() = if (!isBatteryEnabled) {
+            0f
+        } else {
+            ((cycleDays - daysUntilDue).toFloat() / cycleDays.toFloat()).coerceIn(0f, 1f)
+        }
+
+    val accruedAmount: Double
+        get() = if (!isBatteryEnabled) 0.0 else cycleTargetAmount * chargeProgress
+
+    val weeksUntilDue: Long
+        get() = (daysUntilDue / 7L).coerceAtLeast(0L)
+
+    val isReadyToPay: Boolean
+        get() = isBatteryEnabled && (daysUntilDue in 0L..7L || chargeProgress >= 0.95f)
+}
 
 data class LoanConfig(
     val name: String,
@@ -982,11 +1095,45 @@ data class GroupedShareHolding(
     val gainLossPct: Double = if (totalCostBasis > 0) (totalGainLoss / totalCostBasis) * 100 else 0.0
 }
 
+val AppDateDisplayFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
+
+fun parseFlexibleDate(dateStr: String): LocalDate? {
+    val trimmed = dateStr.trim()
+    if (trimmed.isBlank()) return null
+    val patterns = listOf(
+        "d MMM yyyy",
+        "d MMMM yyyy",
+        "dd/MM/yyyy",
+        "d/M/yyyy",
+        "dd-MM-yyyy",
+        "d-M-yyyy",
+        "yyyy-MM-dd"
+    )
+    for (pat in patterns) {
+        try {
+            return LocalDate.parse(trimmed, DateTimeFormatter.ofPattern(pat, Locale.getDefault()))
+        } catch (_: Exception) {}
+    }
+    return try {
+        LocalDate.parse(trimmed)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+fun formatDisplayDate(dateStr: String): String {
+    val trimmed = dateStr.trim()
+    if (trimmed.isBlank()) return ""
+    val parsed = parseFlexibleDate(trimmed)
+    return parsed?.format(AppDateDisplayFormatter) ?: trimmed
+}
+
 fun formatParcelDate(parcel: ShareParcel): String {
     if (parcel.purchaseDate.isNotBlank()) {
         try {
-            val ld = LocalDate.parse(parcel.purchaseDate.trim())
-            return ld.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()))
+            val ld = parseFlexibleDate(parcel.purchaseDate)
+            if (ld != null) return ld.format(AppDateDisplayFormatter)
+            return parcel.purchaseDate
         } catch (_: Exception) {
             return parcel.purchaseDate
         }
@@ -995,8 +1142,8 @@ fun formatParcelDate(parcel: ShareParcel): String {
     if (match != null) {
         try {
             val epoch = match.value.toLong()
-            val date = java.time.Instant.ofEpochMilli(epoch).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
-            return date.format(DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()))
+            val date = Instant.ofEpochMilli(epoch).atZone(ZoneId.systemDefault()).toLocalDate()
+            return date.format(AppDateDisplayFormatter)
         } catch (_: Exception) {}
     }
     return "Initial Purchase"
@@ -1032,6 +1179,14 @@ data class AmortizationRow(
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Fire off background AI warmup to eliminate the 1-2 minute Play Integrity cold start delay
+        kotlin.concurrent.thread {
+            kotlinx.coroutines.runBlocking {
+                AiAssistantManager.warmUp()
+            }
+        }
+        
         enableEdgeToEdge()
         setContent {
             val auth = remember { FirebaseAuth.getInstance() }
@@ -1141,12 +1296,7 @@ fun generateAmortizationSchedule(
     maxFortnights: Int = 780
 ): List<AmortizationRow> {
     val rows = mutableListOf<AmortizationRow>()
-    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
-    var currentDate = try {
-        LocalDate.parse(config.startDateStr, formatter)
-    } catch (_: Exception) {
-        LocalDate.now()
-    }
+    var currentDate = parseFlexibleDate(config.startDateStr) ?: LocalDate.now()
 
     var balance = config.startLoanBalance.coerceAtLeast(0.0)
     var accrued = 0.0
@@ -1155,7 +1305,7 @@ fun generateAmortizationSchedule(
     rows.add(
         AmortizationRow(
             fortnightNumber = 0,
-            paymentDate = currentDate.format(formatter),
+            paymentDate = currentDate.format(AppDateDisplayFormatter),
             payment = 0.0,
             monthlyInterestCharged = 0.0,
             accruedInterest = 0.0,
@@ -1186,7 +1336,7 @@ fun generateAmortizationSchedule(
         rows.add(
             AmortizationRow(
                 fortnightNumber = fn,
-                paymentDate = currentDate.format(formatter),
+                paymentDate = currentDate.format(AppDateDisplayFormatter),
                 payment = actualPayment,
                 monthlyInterestCharged = monthlyCharged,
                 accruedInterest = accrued,
@@ -1199,8 +1349,7 @@ fun generateAmortizationSchedule(
 
 fun getElapsedFortnightsSinceStart(startDateStr: String): Int {
     return try {
-        val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
-        val start = LocalDate.parse(startDateStr, formatter)
+        val start = parseFlexibleDate(startDateStr) ?: return 0
         val today = LocalDate.now()
         val days = ChronoUnit.DAYS.between(start, today)
         if (days <= 0) 0 else (days / 14).toInt()
@@ -1317,11 +1466,18 @@ fun computeWhatIfProjection(
     pathASeries.add(baseNetWorth)
 
     val safeHorizon = horizonYears.coerceIn(1, 40)
+    var currentStatusQuoAnnualSurplus = baseSurplusWeekly * 52.0
     repeat(safeHorizon) {
-        val annualSurplus = baseSurplusWeekly * 52.0
         aProp *= 1.04
         aSharesSuper *= 1.075
-        aLiquid += annualSurplus
+        
+        if (showLoans) {
+            aLiquid += currentStatusQuoAnnualSurplus
+        } else {
+            aLiquid = (aLiquid * 1.045) + currentStatusQuoAnnualSurplus
+        }
+        currentStatusQuoAnnualSurplus *= 1.03
+
         val debtPaydown = (aLiab * 0.035).coerceAtMost(aLiab)
         aLiab = (aLiab - debtPaydown).coerceAtLeast(0.0)
         val nw = (aProp + aSharesSuper + baseOtherAssetsVal + aLiquid) - aLiab
@@ -1363,7 +1519,12 @@ fun computeWhatIfProjection(
             }
         }
 
-        val annualNetSurplus = (baseSurplusWeekly + activeWeeklyDelta) * 52.0
+        // Base surplus + active delta, with 3% annual wage/rental growth compounding each year
+        var annualNetSurplus = (baseSurplusWeekly + activeWeeklyDelta) * 52.0
+        if (year > 1) {
+            annualNetSurplus *= 1.03.pow((year - 1).toDouble())
+        }
+
         val annualSuperBoost = superBoostWeekly.toDouble() * 52.0
 
         bProp = (bProp + propAssetAdd) * 1.04
@@ -1371,7 +1532,12 @@ fun computeWhatIfProjection(
         bExtraSuper = (bExtraSuper + annualSuperBoost) * 1.08
         bOther += otherAssetAdd
 
-        bLiquid += annualNetSurplus
+        // 4.5% savings interest in tenant/HISA mode, or pure accumulation in offset mode + annual net surplus
+        if (showLoans) {
+            bLiquid += annualNetSurplus
+        } else {
+            bLiquid = (bLiquid * 1.045) + annualNetSurplus
+        }
         if (bLiquid < 0.0 && foundDeficitYear == null) {
             foundDeficitYear = year
         }
@@ -1480,41 +1646,6 @@ fun ExpenseTrackerApp(
         }
     }
 
-    fun loadAiChatHistory(): List<ChatMessage> {
-        val raw = sharedPrefs.getString("ai_chat_history", null) ?: return emptyList()
-        return try {
-            val arr = JSONArray(raw)
-            val list = mutableListOf<ChatMessage>()
-            for (i in 0 until arr.length()) {
-                list.add(ChatMessage.fromJson(arr.getJSONObject(i)))
-            }
-            list
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
-    fun persistAiChatHistoryToPrefs(history: List<ChatMessage>) {
-        try {
-            val arr = JSONArray()
-            history.takeLast(200).forEach { arr.put(it.toJson()) }
-            sharedPrefs.edit { putString("ai_chat_history", arr.toString()) }
-        } catch (_: Exception) {}
-    }
-
-    fun saveAiChatHistory(history: List<ChatMessage>) {
-        persistAiChatHistoryToPrefs(history)
-        val serialized = history.takeLast(100).map { msg ->
-            hashMapOf<String, Any>(
-                "text" to msg.text,
-                "isFromUser" to msg.isFromUser,
-                "timestamp" to msg.timestamp,
-                "appliedActions" to msg.appliedActions
-            )
-        }
-        updateFirestore("ai_chat_history", serialized)
-    }
-
     fun loadLearnedFacts(): List<LearnedUserFact> {
         val raw = sharedPrefs.getString("ai_learned_facts", null) ?: return emptyList()
         return try {
@@ -1568,27 +1699,8 @@ fun ExpenseTrackerApp(
     }
 
     val geminiMessages = remember(activeHouseholdUid) {
-        val saved = loadAiChatHistory()
-        mutableStateListOf<ChatMessage>().apply {
-            if (saved.isNotEmpty()) {
-                addAll(saved)
-            } else {
-                add(
-                    ChatMessage(
-                        text = "Hello $activeLoggedInPersonName. I am CoinBot. Looking at your COINLENS Wealth overview, how can I assist you with your goals today?",
-                        isFromUser = false
-                    )
-                )
-            }
-        }
-    }
-    LaunchedEffect(activeLoggedInPersonName) {
-        if (geminiMessages.size == 1 && !geminiMessages[0].isFromUser) {
-            geminiMessages[0] = ChatMessage(
-                text = "Hello $activeLoggedInPersonName. I am CoinBot. Looking at your COINLENS Wealth overview, how can I assist you with your goals today?",
-                isFromUser = false
-            )
-        }
+        // Ephemeral in-session chat: starts fresh when app opens
+        mutableStateListOf<ChatMessage>()
     }
 
     fun persistAppConfigToLocalPrefs(cfg: UserAppConfig) {
@@ -1767,7 +1879,13 @@ fun ExpenseTrackerApp(
                         id = o.optString("id", "item_$i"),
                         name = o.getString("name"),
                         weeklyAmount = o.getDouble("amount"),
-                        iconName = o.optString("iconName", "Default")
+                        iconName = o.optString("iconName", "Default"),
+                        customSubtitle = o.optString("customSubtitle", "").takeIf { it.isNotBlank() },
+                        billingCycle = BillingCycle.fromName(o.optString("billingCycle", "WEEKLY")),
+                        nextDueDateEpochMillis = if (o.has("nextDueDateEpochMillis") && !o.isNull("nextDueDateEpochMillis")) {
+                            o.optLong("nextDueDateEpochMillis", 0L).takeIf { it > 0L }
+                        } else null,
+                        linkedAssetId = o.optString("linkedAssetId", "").takeIf { it.isNotBlank() }
                     )
                 )
             }
@@ -1810,6 +1928,16 @@ fun ExpenseTrackerApp(
             obj.put("name", it.name)
             obj.put("amount", it.weeklyAmount)
             obj.put("iconName", it.iconName)
+            obj.put("billingCycle", it.billingCycle.name)
+            if (it.nextDueDateEpochMillis != null && it.nextDueDateEpochMillis > 0L) {
+                obj.put("nextDueDateEpochMillis", it.nextDueDateEpochMillis)
+            }
+            if (!it.linkedAssetId.isNullOrBlank()) {
+                obj.put("linkedAssetId", it.linkedAssetId)
+            }
+            if (!it.customSubtitle.isNullOrBlank()) {
+                obj.put("customSubtitle", it.customSubtitle)
+            }
             jsonArr.put(obj)
         }
         sharedPrefs.edit { putString(key, jsonArr.toString()) }
@@ -1824,7 +1952,10 @@ fun ExpenseTrackerApp(
                 "name" to it.name,
                 "amount" to it.weeklyAmount,
                 "isLockedMortgageOrPropertyLink" to it.isLockedMortgageOrPropertyLink,
-                "iconName" to it.iconName
+                "iconName" to it.iconName,
+                "billingCycle" to it.billingCycle.name,
+                "nextDueDateEpochMillis" to (it.nextDueDateEpochMillis ?: 0L),
+                "linkedAssetId" to (it.linkedAssetId ?: "")
             )
         }
         updateFirestore(key, serializedList)
@@ -2040,6 +2171,7 @@ fun ExpenseTrackerApp(
     LaunchedEffect(activeHouseholdUid) {
         userDocRef.addSnapshotListener { snapshot, e ->
             if (e != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
+            if (snapshot.metadata.hasPendingWrites()) return@addSnapshotListener
             val data = snapshot.data ?: return@addSnapshotListener
 
             val linkedRedirect = data["linked_household_uid"] as? String
@@ -2117,7 +2249,10 @@ fun ExpenseTrackerApp(
                             name = it["name"] as? String ?: return@mapNotNull null,
                             weeklyAmount = (it["amount"] as? Number)?.toDouble() ?: return@mapNotNull null,
                             isLockedMortgageOrPropertyLink = it["isLockedMortgageOrPropertyLink"] as? Boolean ?: false,
-                            iconName = it["iconName"] as? String ?: "Default"
+                            iconName = it["iconName"] as? String ?: "Default",
+                            billingCycle = BillingCycle.fromName(it["billingCycle"] as? String),
+                            nextDueDateEpochMillis = (it["nextDueDateEpochMillis"] as? Number)?.toLong()?.takeIf { ms -> ms > 0L },
+                            linkedAssetId = (it["linkedAssetId"] as? String)?.takeIf { s -> s.isNotBlank() }
                         )
                     } catch (_: Exception) { null }
                 }
@@ -2255,30 +2390,6 @@ fun ExpenseTrackerApp(
             if (!remoteDigest.isNullOrBlank() && remoteDigest != conversationDigest) {
                 conversationDigest = remoteDigest
                 sharedPrefs.edit { putString("ai_conversation_digest", remoteDigest) }
-            }
-
-            @Suppress("UNCHECKED_CAST")
-            val remoteChat = data["ai_chat_history"] as? List<Map<String, Any>>
-            if (remoteChat != null && geminiMessages.size <= 1) {
-                val parsed = remoteChat.mapNotNull { m ->
-                    val text = m["text"] as? String ?: return@mapNotNull null
-                    val isFromUser = m["isFromUser"] as? Boolean ?: false
-                    val ts = m["timestamp"] as? String ?: ""
-                    val fn = m["attachedFileName"] as? String
-                    val acts = (m["appliedActions"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
-                    ChatMessage(
-                        text = text,
-                        isFromUser = isFromUser,
-                        timestamp = ts,
-                        attachedFileName = fn,
-                        appliedActions = acts
-                    )
-                }
-                if (parsed.isNotEmpty()) {
-                    geminiMessages.clear()
-                    geminiMessages.addAll(parsed)
-                    persistAiChatHistoryToPrefs(parsed)
-                }
             }
         }
     }
@@ -3352,7 +3463,7 @@ fun ExpenseTrackerApp(
                         shape = headerGlassShape,
                         tintColor = BrandForestDark,
                         intensity = 1.20f,
-                        accentRimColor = currentSection.getColor(appConfig),
+                        accentRimColor = currentSection.getColor(),
                         role = LiquidGlassRole.HEADER
                     ),
                 shape = headerGlassShape,
@@ -3438,14 +3549,318 @@ fun ExpenseTrackerApp(
     }
 
     val liquidBoundaryState = remember { LiquidScrollBoundaryState() }
+    val orbRevealState = remember { OrbRevealState() }
     var isHorizontalChildTouched by remember { mutableStateOf(false) }
 
+    val selectedTabIndex by remember(pagerState) {
+        derivedStateOf { pagerState.targetPage }
+    }
+
+    val navigateToSettingsTab: () -> Unit = remember(activeSections, navigateToTab) {
+        {
+            val settingsIdx = activeSections.indexOf(AppSection.SETTINGS)
+            navigateToTab(settingsIdx)
+        }
+    }
+    val navigateToWhatIfTab: () -> Unit = remember(activeSections, navigateToTab) {
+        {
+            val whatIfIdx = activeSections.indexOf(AppSection.WHAT_IF)
+            navigateToTab(whatIfIdx)
+        }
+    }
+    val onUpdateIncomeCallback: (Boolean, Double) -> Unit = remember(sharedPrefs) {
+        { isPerson1, newInc ->
+            if (isPerson1) {
+                person1Income = newInc
+                sharedPrefs.edit { putFloat("person1_inc", newInc.toFloat()) }
+                updateFirestore("person1_inc", newInc)
+            } else {
+                person2Income = newInc
+                sharedPrefs.edit { putFloat("person2_inc", newInc.toFloat()) }
+                updateFirestore("person2_inc", newInc)
+            }
+        }
+    }
+    val onUpdateSavingsCallback: (Boolean, Double) -> Unit = remember(sharedPrefs) {
+        { isPerson1, newSavings ->
+            if (isPerson1) {
+                person1Savings = newSavings
+                sharedPrefs.edit { putFloat("person1_savings", newSavings.toFloat()) }
+                updateFirestore("person1_savings", newSavings)
+            } else {
+                person2Savings = newSavings
+                sharedPrefs.edit { putFloat("person2_savings", newSavings.toFloat()) }
+                updateFirestore("person2_savings", newSavings)
+            }
+        }
+    }
+    val onAddPerson1Callback: (String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = person1Items + CashflowItem(
+                id = "p1_${System.currentTimeMillis()}",
+                name = name,
+                weeklyAmount = amt,
+                iconName = iconName,
+                billingCycle = cycle,
+                nextDueDateEpochMillis = dueMillis,
+                linkedAssetId = assetId
+            )
+            person1Items = updated
+            saveList("person1_items", updated)
+        }
+    }
+    val onEditPerson1Callback: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { id, name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = person1Items.map {
+                if (it.id == id) {
+                    it.copy(
+                        name = name,
+                        weeklyAmount = amt,
+                        iconName = iconName,
+                        billingCycle = cycle,
+                        nextDueDateEpochMillis = dueMillis,
+                        linkedAssetId = assetId
+                    )
+                } else it
+            }
+            person1Items = updated
+            saveList("person1_items", updated)
+        }
+    }
+    val onDeletePerson1Callback: (String) -> Unit = remember {
+        { id ->
+            val updated = person1Items.filterNot { it.id == id }
+            person1Items = updated
+            saveList("person1_items", updated)
+        }
+    }
+    val onAddPerson2Callback: (String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = person2Items + CashflowItem(
+                id = "p2_${System.currentTimeMillis()}",
+                name = name,
+                weeklyAmount = amt,
+                iconName = iconName,
+                billingCycle = cycle,
+                nextDueDateEpochMillis = dueMillis,
+                linkedAssetId = assetId
+            )
+            person2Items = updated
+            saveList("person2_items", updated)
+        }
+    }
+    val onEditPerson2Callback: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { id, name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = person2Items.map {
+                if (it.id == id) {
+                    it.copy(
+                        name = name,
+                        weeklyAmount = amt,
+                        iconName = iconName,
+                        billingCycle = cycle,
+                        nextDueDateEpochMillis = dueMillis,
+                        linkedAssetId = assetId
+                    )
+                } else it
+            }
+            person2Items = updated
+            saveList("person2_items", updated)
+        }
+    }
+    val onDeletePerson2Callback: (String) -> Unit = remember {
+        { id ->
+            val updated = person2Items.filterNot { it.id == id }
+            person2Items = updated
+            saveList("person2_items", updated)
+        }
+    }
+    val onAddProp1Callback: (String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = prop1Items + CashflowItem(
+                id = "pr1_${System.currentTimeMillis()}",
+                name = name,
+                weeklyAmount = amt,
+                iconName = iconName,
+                billingCycle = cycle,
+                nextDueDateEpochMillis = dueMillis,
+                linkedAssetId = assetId
+            )
+            prop1Items = updated
+            saveList("prop1_items", updated)
+        }
+    }
+    val onEditProp1Callback: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { id, name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = prop1Items.map {
+                if (it.id == id) {
+                    it.copy(
+                        name = name,
+                        weeklyAmount = amt,
+                        iconName = iconName,
+                        billingCycle = cycle,
+                        nextDueDateEpochMillis = dueMillis,
+                        linkedAssetId = assetId
+                    )
+                } else it
+            }
+            prop1Items = updated
+            saveList("prop1_items", updated)
+        }
+    }
+    val onDeleteProp1Callback: (String) -> Unit = remember {
+        { id ->
+            val updated = prop1Items.filterNot { it.id == id }
+            prop1Items = updated
+            saveList("prop1_items", updated)
+        }
+    }
+    val onAddProp2Callback: (String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = prop2Items + CashflowItem(
+                id = "pr2_${System.currentTimeMillis()}",
+                name = name,
+                weeklyAmount = amt,
+                iconName = iconName,
+                billingCycle = cycle,
+                nextDueDateEpochMillis = dueMillis,
+                linkedAssetId = assetId
+            )
+            prop2Items = updated
+            saveList("prop2_items", updated)
+        }
+    }
+    val onEditProp2Callback: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = remember {
+        { id, name, amt, iconName, cycle, dueMillis, assetId ->
+            val updated = prop2Items.map {
+                if (it.id == id) {
+                    it.copy(
+                        name = name,
+                        weeklyAmount = amt,
+                        iconName = iconName,
+                        billingCycle = cycle,
+                        nextDueDateEpochMillis = dueMillis,
+                        linkedAssetId = assetId
+                    )
+                } else it
+            }
+            prop2Items = updated
+            saveList("prop2_items", updated)
+        }
+    }
+    val onDeleteProp2Callback: (String) -> Unit = remember {
+        { id ->
+            val updated = prop2Items.filterNot { it.id == id }
+            prop2Items = updated
+            saveList("prop2_items", updated)
+        }
+    }
+    val onAddShareCallback: (String, String, Double, Double, Double, String) -> Unit = remember {
+        { code, owner, units, pPrice, cPrice, purchaseDate ->
+            val upperCode = code.trim().uppercase()
+            val newParcel = ShareParcel(
+                id = "sp_${System.currentTimeMillis()}",
+                code = upperCode,
+                owner = owner,
+                units = units,
+                purchasePrice = pPrice,
+                currentPrice = cPrice,
+                purchaseDate = purchaseDate.ifBlank { LocalDate.now().toString() }
+            )
+            val updated = sharesList.map {
+                if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) it.copy(currentPrice = cPrice) else it
+            } + newParcel
+            saveSharesList(updated)
+        }
+    }
+    val onEditShareCallback: (String, String, String, Double, Double, Double, String) -> Unit = remember {
+        { id, code, owner, units, pPrice, cPrice, purchaseDate ->
+            val upperCode = code.trim().uppercase()
+            val updated = sharesList.map {
+                if (it.id == id) {
+                    it.copy(
+                        code = upperCode,
+                        owner = owner,
+                        units = units,
+                        purchasePrice = pPrice,
+                        currentPrice = cPrice,
+                        purchaseDate = purchaseDate
+                    )
+                } else if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) {
+                    it.copy(currentPrice = cPrice)
+                } else {
+                    it
+                }
+            }
+            saveSharesList(updated)
+        }
+    }
+    val onDeleteShareCallback: (String) -> Unit = remember {
+        { id ->
+            val updated = sharesList.filterNot { it.id == id }
+            saveSharesList(updated)
+        }
+    }
+    val onAddSuperAccountCallback: (String, String, Double) -> Unit = remember {
+        { fundName, owner, bal ->
+            val updated = superAccountsList + SuperAccount("sup_${System.currentTimeMillis()}", fundName, owner, bal)
+            saveSuperAccounts(updated)
+        }
+    }
+    val onEditSuperAccountCallback: (String, String, String, Double) -> Unit = remember {
+        { id, fundName, owner, bal ->
+            val updated = superAccountsList.map { if (it.id == id) it.copy(fundName = fundName, owner = owner, balance = bal) else it }
+            saveSuperAccounts(updated)
+        }
+    }
+    val onDeleteSuperAccountCallback: (String) -> Unit = remember {
+        { id ->
+            val updated = superAccountsList.filterNot { it.id == id }
+            saveSuperAccounts(updated)
+        }
+    }
+    val onAddOtherAssetCallback: (String, String, Double) -> Unit = remember {
+        { name, owner, valAmt ->
+            val updated = otherAssetsList + OtherAsset("oa_${System.currentTimeMillis()}", name, owner, valAmt)
+            saveOtherAssets(updated)
+        }
+    }
+    val onEditOtherAssetCallback: (String, String, String, Double) -> Unit = remember {
+        { id, name, owner, valAmt ->
+            val updated = otherAssetsList.map { if (it.id == id) it.copy(name = name, owner = owner, value = valAmt) else it }
+            saveOtherAssets(updated)
+        }
+    }
+    val onDeleteOtherAssetCallback: (String) -> Unit = remember {
+        { id ->
+            val updated = otherAssetsList.filterNot { it.id == id }
+            saveOtherAssets(updated)
+        }
+    }
+
+    var rootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+
     CompositionLocalProvider(
+        LocalOrbRevealState provides orbRevealState,
         LocalLiquidScrollBoundary provides liquidBoundaryState,
         LocalOnHorizontalChildTouchChange provides { isHorizontalChildTouched = it }
     ) {
     Box(
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { rootCoords = it }
+            .pointerInput(orbRevealState) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (orbRevealState.activeOrbKey != null) {
+                        val rootPos = rootCoords?.localToRoot(down.position) ?: down.position
+                        val trayBounds = orbRevealState.activeActionTrayBounds
+                        val isInsideActionTray = trayBounds?.contains(rootPos) == true
+                        if (!isInsideActionTray) {
+                            orbRevealState.dismiss()
+                        }
+                    }
+                }
+            }
     ) {
         if (isExpanded) {
             Row(modifier = Modifier.fillMaxSize()) {
@@ -3459,21 +3874,21 @@ fun ExpenseTrackerApp(
                             shape = railShape,
                             tintColor = BrandForestDark,
                             intensity = 1.15f,
-                            accentRimColor = currentSection.getColor(appConfig),
+                            accentRimColor = currentSection.getColor(),
                             role = LiquidGlassRole.STATIC
                         )
                 ) {
                     Spacer(Modifier.height(16.dp))
                     activeSections.forEachIndexed { index, section ->
                         NavigationRailItem(
-                            selected = pagerState.targetPage == index,
+                            selected = selectedTabIndex == index,
                             onClick = { navigateToTab(index) },
                             icon = { Icon(section.icon, contentDescription = section.title) },
                             label = { Text(if (section == AppSection.PROPERTIES) propertiesNavLabel else section.shortLabel, fontSize = 11.sp) },
                             colors = NavigationRailItemDefaults.colors(
                                 selectedIconColor = BrandForestDark,
-                                selectedTextColor = section.getColor(appConfig),
-                                indicatorColor = section.getColor(appConfig),
+                                selectedTextColor = section.getColor(),
+                                indicatorColor = section.getColor(),
                                 unselectedIconColor = Color.White.copy(alpha = 0.75f),
                                 unselectedTextColor = Color.White.copy(alpha = 0.75f)
                             )
@@ -3484,7 +3899,7 @@ fun ExpenseTrackerApp(
                     HorizontalPager(
                         state = pagerState,
                         key = { page -> activeSections.getOrNull(page)?.name ?: page },
-                        beyondViewportPageCount = 1,
+                        beyondViewportPageCount = 0,
                         userScrollEnabled = !isHorizontalChildTouched,
                         modifier = Modifier.fillMaxSize()
                     ) { page ->
@@ -3548,13 +3963,32 @@ fun ExpenseTrackerApp(
                                 perPersonPropertyShare = perPersonPropertyShare,
                                 person1Items = person1Items,
                                 person2Items = person2Items,
-                                onAddPerson1 = { name, amt, iconName ->
-                                    val updated = person1Items + CashflowItem("p1_${System.currentTimeMillis()}", name, amt, iconName = iconName)
+                                onAddPerson1 = { name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = person1Items + CashflowItem(
+                                        id = "p1_${System.currentTimeMillis()}",
+                                        name = name,
+                                        weeklyAmount = amt,
+                                        iconName = iconName,
+                                        billingCycle = cycle,
+                                        nextDueDateEpochMillis = dueMillis,
+                                        linkedAssetId = assetId
+                                    )
                                     person1Items = updated
                                     saveList("person1_items", updated)
                                 },
-                                onEditPerson1 = { id, name, amt, iconName ->
-                                    val updated = person1Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
+                                onEditPerson1 = { id, name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = person1Items.map {
+                                        if (it.id == id) {
+                                            it.copy(
+                                                name = name,
+                                                weeklyAmount = amt,
+                                                iconName = iconName,
+                                                billingCycle = cycle,
+                                                nextDueDateEpochMillis = dueMillis,
+                                                linkedAssetId = assetId
+                                            )
+                                        } else it
+                                    }
                                     person1Items = updated
                                     saveList("person1_items", updated)
                                 },
@@ -3563,13 +3997,32 @@ fun ExpenseTrackerApp(
                                     person1Items = updated
                                     saveList("person1_items", updated)
                                 },
-                                onAddPerson2 = { name, amt, iconName ->
-                                    val updated = person2Items + CashflowItem("p2_${System.currentTimeMillis()}", name, amt, iconName = iconName)
+                                onAddPerson2 = { name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = person2Items + CashflowItem(
+                                        id = "p2_${System.currentTimeMillis()}",
+                                        name = name,
+                                        weeklyAmount = amt,
+                                        iconName = iconName,
+                                        billingCycle = cycle,
+                                        nextDueDateEpochMillis = dueMillis,
+                                        linkedAssetId = assetId
+                                    )
                                     person2Items = updated
                                     saveList("person2_items", updated)
                                 },
-                                onEditPerson2 = { id, name, amt, iconName ->
-                                    val updated = person2Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
+                                onEditPerson2 = { id, name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = person2Items.map {
+                                        if (it.id == id) {
+                                            it.copy(
+                                                name = name,
+                                                weeklyAmount = amt,
+                                                iconName = iconName,
+                                                billingCycle = cycle,
+                                                nextDueDateEpochMillis = dueMillis,
+                                                linkedAssetId = assetId
+                                            )
+                                        } else it
+                                    }
                                     person2Items = updated
                                     saveList("person2_items", updated)
                                 },
@@ -3584,13 +4037,32 @@ fun ExpenseTrackerApp(
                                 prop1WeeklyMortgage = prop1WeeklyMortgage,
                                 prop1Items = prop1Items,
                                 isWealthHidden = isWealthHidden,
-                                onAddProp1 = { name, amt, iconName ->
-                                    val updated = prop1Items + CashflowItem("pr1_${System.currentTimeMillis()}", name, amt, iconName = iconName)
+                                onAddProp1 = { name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = prop1Items + CashflowItem(
+                                        id = "pr1_${System.currentTimeMillis()}",
+                                        name = name,
+                                        weeklyAmount = amt,
+                                        iconName = iconName,
+                                        billingCycle = cycle,
+                                        nextDueDateEpochMillis = dueMillis,
+                                        linkedAssetId = assetId
+                                    )
                                     prop1Items = updated
                                     saveList("prop1_items", updated)
                                 },
-                                onEditProp1 = { id, name, amt, iconName ->
-                                    val updated = prop1Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
+                                onEditProp1 = { id, name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = prop1Items.map {
+                                        if (it.id == id) {
+                                            it.copy(
+                                                name = name,
+                                                weeklyAmount = amt,
+                                                iconName = iconName,
+                                                billingCycle = cycle,
+                                                nextDueDateEpochMillis = dueMillis,
+                                                linkedAssetId = assetId
+                                            )
+                                        } else it
+                                    }
                                     prop1Items = updated
                                     saveList("prop1_items", updated)
                                 },
@@ -3601,13 +4073,32 @@ fun ExpenseTrackerApp(
                                 },
                                 prop2WeeklyMortgage = prop2WeeklyMortgage,
                                 prop2Items = prop2Items,
-                                onAddProp2 = { name, amt, iconName ->
-                                    val updated = prop2Items + CashflowItem("pr2_${System.currentTimeMillis()}", name, amt, iconName = iconName)
+                                onAddProp2 = { name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = prop2Items + CashflowItem(
+                                        id = "pr2_${System.currentTimeMillis()}",
+                                        name = name,
+                                        weeklyAmount = amt,
+                                        iconName = iconName,
+                                        billingCycle = cycle,
+                                        nextDueDateEpochMillis = dueMillis,
+                                        linkedAssetId = assetId
+                                    )
                                     prop2Items = updated
                                     saveList("prop2_items", updated)
                                 },
-                                onEditProp2 = { id, name, amt, iconName ->
-                                    val updated = prop2Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
+                                onEditProp2 = { id, name, amt, iconName, cycle, dueMillis, assetId ->
+                                    val updated = prop2Items.map {
+                                        if (it.id == id) {
+                                            it.copy(
+                                                name = name,
+                                                weeklyAmount = amt,
+                                                iconName = iconName,
+                                                billingCycle = cycle,
+                                                nextDueDateEpochMillis = dueMillis,
+                                                linkedAssetId = assetId
+                                            )
+                                        } else it
+                                    }
                                     prop2Items = updated
                                     saveList("prop2_items", updated)
                                 },
@@ -3752,12 +4243,7 @@ fun ExpenseTrackerApp(
                                 financialContextSummary = detailedFinancialContext,
                                 onExecuteAiActions = ::executeAiActions,
                                 learnedFacts = learnedFacts,
-                                conversationDigest = conversationDigest,
-                                onAddLearnedFact = { fact ->
-                                    val updated = learnedFacts.filter { it.id != fact.id } + fact
-                                    learnedFacts = updated
-                                    saveLearnedFacts(updated)
-                                }
+                                conversationDigest = conversationDigest
                             )
                             AppSection.SETTINGS -> SettingsScreen(
                                 appConfig = appConfig,
@@ -3804,30 +4290,10 @@ fun ExpenseTrackerApp(
                     if (appConfig.useExpnzAi) {
                         FloatingAiAssistantWidget(
                             financialContextSummary = detailedFinancialContext,
-                            personName = activeLoggedInPersonName,
                             messages = geminiMessages,
                             learnedFacts = learnedFacts,
                             conversationDigest = conversationDigest,
-                            onAddImportedShares = { newParcels: List<ShareParcel> ->
-                                val updated = sharesList + newParcels
-                                saveSharesList(updated)
-                            },
                             onExecuteAiActions = ::executeAiActions,
-                            onSaveMessages = { saveAiChatHistory(it) },
-                            onAddLearnedFact = { fact ->
-                                val updated = learnedFacts.filter { it.id != fact.id } + fact
-                                learnedFacts = updated
-                                saveLearnedFacts(updated)
-                            },
-                            onRemoveLearnedFact = { factId ->
-                                val updated = learnedFacts.filter { it.id != factId }
-                                learnedFacts = updated
-                                saveLearnedFacts(updated)
-                            },
-                            onClearAllFacts = {
-                                learnedFacts = emptyList()
-                                saveLearnedFacts(emptyList())
-                            },
                             onUpdateDigest = {
                                 conversationDigest = it
                                 saveConversationDigest(it)
@@ -3841,7 +4307,7 @@ fun ExpenseTrackerApp(
                 HorizontalPager(
                     state = pagerState,
                     key = { page -> activeSections.getOrNull(page)?.name ?: page },
-                    beyondViewportPageCount = 1,
+                    beyondViewportPageCount = 0,
                     userScrollEnabled = !isHorizontalChildTouched,
                     modifier = Modifier.fillMaxSize()
                 ) { page ->
@@ -3861,14 +4327,8 @@ fun ExpenseTrackerApp(
                             person1Savings = person1Savings,
                             person2Savings = person2Savings,
                             isWealthHidden = isWealthHidden,
-                            onNavigateToSettings = {
-                                val settingsIdx = activeSections.indexOf(AppSection.SETTINGS)
-                                navigateToTab(settingsIdx)
-                            },
-                            onNavigateToWhatIf = {
-                                val whatIfIdx = activeSections.indexOf(AppSection.WHAT_IF)
-                                navigateToTab(whatIfIdx)
-                            }
+                            onNavigateToSettings = navigateToSettingsTab,
+                            onNavigateToWhatIf = navigateToWhatIfTab
                         )
                         AppSection.CASH_FLOW -> MoneyPlanScreen(
                             appConfig = appConfig,
@@ -3880,99 +4340,31 @@ fun ExpenseTrackerApp(
                             person2Savings = person2Savings,
                             isWealthHidden = isWealthHidden,
                             isPartnerLoggedIn = isLoggedInAsPartner,
-                            onUpdateIncome = { isPerson1, newInc ->
-                                if (isPerson1) {
-                                    person1Income = newInc
-                                    sharedPrefs.edit { putFloat("person1_inc", newInc.toFloat()) }
-                                    updateFirestore("person1_inc", newInc)
-                                } else {
-                                    person2Income = newInc
-                                    sharedPrefs.edit { putFloat("person2_inc", newInc.toFloat()) }
-                                    updateFirestore("person2_inc", newInc)
-                                }
-                            },
-                            onUpdateSavings = { isPerson1, newSavings ->
-                                if (isPerson1) {
-                                    person1Savings = newSavings
-                                    sharedPrefs.edit { putFloat("person1_savings", newSavings.toFloat()) }
-                                    updateFirestore("person1_savings", newSavings)
-                                } else {
-                                    person2Savings = newSavings
-                                    sharedPrefs.edit { putFloat("person2_savings", newSavings.toFloat()) }
-                                    updateFirestore("person2_savings", newSavings)
-                                }
-                            },
+                            onUpdateIncome = onUpdateIncomeCallback,
+                            onUpdateSavings = onUpdateSavingsCallback,
                             perPersonPropertyShare = perPersonPropertyShare,
                             person1Items = person1Items,
                             person2Items = person2Items,
-                            onAddPerson1 = { name, amt, iconName ->
-                                val updated = person1Items + CashflowItem("p1_${System.currentTimeMillis()}", name, amt, iconName = iconName)
-                                person1Items = updated
-                                saveList("person1_items", updated)
-                            },
-                            onEditPerson1 = { id, name, amt, iconName ->
-                                val updated = person1Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
-                                person1Items = updated
-                                saveList("person1_items", updated)
-                            },
-                            onDeletePerson1 = { id ->
-                                val updated = person1Items.filterNot { it.id == id }
-                                person1Items = updated
-                                saveList("person1_items", updated)
-                            },
-                            onAddPerson2 = { name, amt, iconName ->
-                                val updated = person2Items + CashflowItem("p2_${System.currentTimeMillis()}", name, amt, iconName = iconName)
-                                person2Items = updated
-                                saveList("person2_items", updated)
-                            },
-                            onEditPerson2 = { id, name, amt, iconName ->
-                                val updated = person2Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
-                                person2Items = updated
-                                saveList("person2_items", updated)
-                            },
-                            onDeletePerson2 = { id ->
-                                val updated = person2Items.filterNot { it.id == id }
-                                person2Items = updated
-                                saveList("person2_items", updated)
-                            }
+                            onAddPerson1 = onAddPerson1Callback,
+                            onEditPerson1 = onEditPerson1Callback,
+                            onDeletePerson1 = onDeletePerson1Callback,
+                            onAddPerson2 = onAddPerson2Callback,
+                            onEditPerson2 = onEditPerson2Callback,
+                            onDeletePerson2 = onDeletePerson2Callback
                         )
                         AppSection.PROPERTIES -> PropertiesScreen(
                             appConfig = appConfig,
                             prop1WeeklyMortgage = prop1WeeklyMortgage,
                             prop1Items = prop1Items,
                             isWealthHidden = isWealthHidden,
-                            onAddProp1 = { name, amt, iconName ->
-                                val updated = prop1Items + CashflowItem("pr1_${System.currentTimeMillis()}", name, amt, iconName = iconName)
-                                prop1Items = updated
-                                saveList("prop1_items", updated)
-                            },
-                            onEditProp1 = { id, name, amt, iconName ->
-                                val updated = prop1Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
-                                prop1Items = updated
-                                saveList("prop1_items", updated)
-                            },
-                            onDeleteProp1 = { id ->
-                                val updated = prop1Items.filterNot { it.id == id }
-                                prop1Items = updated
-                                saveList("prop1_items", updated)
-                            },
+                            onAddProp1 = onAddProp1Callback,
+                            onEditProp1 = onEditProp1Callback,
+                            onDeleteProp1 = onDeleteProp1Callback,
                             prop2WeeklyMortgage = prop2WeeklyMortgage,
                             prop2Items = prop2Items,
-                            onAddProp2 = { name, amt, iconName ->
-                                val updated = prop2Items + CashflowItem("pr2_${System.currentTimeMillis()}", name, amt, iconName = iconName)
-                                prop2Items = updated
-                                saveList("prop2_items", updated)
-                            },
-                            onEditProp2 = { id, name, amt, iconName ->
-                                val updated = prop2Items.map { if (it.id == id) it.copy(name = name, weeklyAmount = amt, iconName = iconName) else it }
-                                prop2Items = updated
-                                saveList("prop2_items", updated)
-                            },
-                            onDeleteProp2 = { id ->
-                                val updated = prop2Items.filterNot { it.id == id }
-                                prop2Items = updated
-                                saveList("prop2_items", updated)
-                            },
+                            onAddProp2 = onAddProp2Callback,
+                            onEditProp2 = onEditProp2Callback,
+                            onDeleteProp2 = onDeleteProp2Callback,
                             prop1MarketValue = prop1EstimatedValue,
                             prop2MarketValue = prop2EstimatedValue,
                             prop1LoanBalance = prop1LiveBalance,
@@ -3987,59 +4379,13 @@ fun ExpenseTrackerApp(
                             sharesList = sharesList,
                             superAccountsList = superAccountsList,
                             isWealthHidden = isWealthHidden,
-                            onAddShare = { code, owner, units, pPrice, cPrice, purchaseDate ->
-                                val upperCode = code.trim().uppercase()
-                                val newParcel = ShareParcel(
-                                    id = "sp_${System.currentTimeMillis()}",
-                                    code = upperCode,
-                                    owner = owner,
-                                    units = units,
-                                    purchasePrice = pPrice,
-                                    currentPrice = cPrice,
-                                    purchaseDate = purchaseDate.ifBlank { LocalDate.now().toString() }
-                                )
-                                val updated = sharesList.map {
-                                    if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) it.copy(currentPrice = cPrice) else it
-                                } + newParcel
-                                saveSharesList(updated)
-                            },
-                            onEditShare = { id, code, owner, units, pPrice, cPrice, purchaseDate ->
-                                val upperCode = code.trim().uppercase()
-                                val updated = sharesList.map {
-                                    if (it.id == id) {
-                                        it.copy(
-                                            code = upperCode,
-                                            owner = owner,
-                                            units = units,
-                                            purchasePrice = pPrice,
-                                            currentPrice = cPrice,
-                                            purchaseDate = purchaseDate
-                                        )
-                                    } else if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) {
-                                        it.copy(currentPrice = cPrice)
-                                    } else {
-                                        it
-                                    }
-                                }
-                                saveSharesList(updated)
-                            },
-                            onDeleteShare = { id ->
-                                val updated = sharesList.filterNot { it.id == id }
-                                saveSharesList(updated)
-                            },
+                            onAddShare = onAddShareCallback,
+                            onEditShare = onEditShareCallback,
+                            onDeleteShare = onDeleteShareCallback,
                             onUpdateSharesList = { saveSharesList(it) },
-                            onAddSuperAccount = { fundName, owner, bal ->
-                                val updated = superAccountsList + SuperAccount("sup_${System.currentTimeMillis()}", fundName, owner, bal)
-                                saveSuperAccounts(updated)
-                            },
-                            onEditSuperAccount = { id, fundName, owner, bal ->
-                                val updated = superAccountsList.map { if (it.id == id) it.copy(fundName = fundName, owner = owner, balance = bal) else it }
-                                saveSuperAccounts(updated)
-                            },
-                            onDeleteSuperAccount = { id ->
-                                val updated = superAccountsList.filterNot { it.id == id }
-                                saveSuperAccounts(updated)
-                            }
+                            onAddSuperAccount = onAddSuperAccountCallback,
+                            onEditSuperAccount = onEditSuperAccountCallback,
+                            onDeleteSuperAccount = onDeleteSuperAccountCallback
                         )
                         AppSection.OTHER_ASSETS -> OtherAssetsScreen(
                             appConfig = appConfig,
@@ -4047,18 +4393,9 @@ fun ExpenseTrackerApp(
                             person2Color = person2Color,
                             otherAssetsList = otherAssetsList,
                             isWealthHidden = isWealthHidden,
-                            onAddOtherAsset = { name, owner, valAmt ->
-                                val updated = otherAssetsList + OtherAsset("oa_${System.currentTimeMillis()}", name, owner, valAmt)
-                                saveOtherAssets(updated)
-                            },
-                            onEditOtherAsset = { id, name, owner, valAmt ->
-                                val updated = otherAssetsList.map { if (it.id == id) it.copy(name = name, owner = owner, value = valAmt) else it }
-                                saveOtherAssets(updated)
-                            },
-                            onDeleteOtherAsset = { id ->
-                                val updated = otherAssetsList.filterNot { it.id == id }
-                                saveOtherAssets(updated)
-                            }
+                            onAddOtherAsset = onAddOtherAssetCallback,
+                            onEditOtherAsset = onEditOtherAssetCallback,
+                            onDeleteOtherAsset = onDeleteOtherAssetCallback
                         )
                         AppSection.LOANS -> LoansAndOffsetScreen(
                             appConfig = appConfig,
@@ -4109,12 +4446,7 @@ fun ExpenseTrackerApp(
                             financialContextSummary = detailedFinancialContext,
                             onExecuteAiActions = ::executeAiActions,
                             learnedFacts = learnedFacts,
-                            conversationDigest = conversationDigest,
-                            onAddLearnedFact = { fact ->
-                                val updated = learnedFacts.filter { it.id != fact.id } + fact
-                                learnedFacts = updated
-                                saveLearnedFacts(updated)
-                            }
+                            conversationDigest = conversationDigest
                         )
                         AppSection.SETTINGS -> SettingsScreen(
                             appConfig = appConfig,
@@ -4178,7 +4510,7 @@ fun ExpenseTrackerApp(
                                 shape = dockShape,
                                 tintColor = BrandForestDark,
                                 intensity = 1.20f,
-                                accentRimColor = currentSection.getColor(appConfig),
+                                accentRimColor = currentSection.getColor(),
                                 role = LiquidGlassRole.FOOTER
                             ),
                         shape = dockShape,
@@ -4193,9 +4525,9 @@ fun ExpenseTrackerApp(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             activeSections.forEachIndexed { index, section ->
-                                val isSelected = pagerState.targetPage == index
+                                val isSelected = selectedTabIndex == index
                                 val animatedBgColor by animateColorAsState(
-                                    targetValue = if (isSelected) section.getColor(appConfig).copy(alpha = 0.92f) else Color.Transparent,
+                                    targetValue = if (isSelected) section.getColor().copy(alpha = 0.92f) else Color.Transparent,
                                     animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
                                     label = "tab_bg_$index"
                                 )
@@ -4241,30 +4573,10 @@ fun ExpenseTrackerApp(
                 if (appConfig.useExpnzAi) {
                     FloatingAiAssistantWidget(
                         financialContextSummary = detailedFinancialContext,
-                        personName = activeLoggedInPersonName,
                         messages = geminiMessages,
                         learnedFacts = learnedFacts,
                         conversationDigest = conversationDigest,
-                        onAddImportedShares = { newParcels: List<ShareParcel> ->
-                            val updated = sharesList + newParcels
-                            saveSharesList(updated)
-                        },
                         onExecuteAiActions = ::executeAiActions,
-                        onSaveMessages = { saveAiChatHistory(it) },
-                        onAddLearnedFact = { fact ->
-                            val updated = learnedFacts.filter { it.id != fact.id } + fact
-                            learnedFacts = updated
-                            saveLearnedFacts(updated)
-                        },
-                        onRemoveLearnedFact = { factId ->
-                            val updated = learnedFacts.filter { it.id != factId }
-                            learnedFacts = updated
-                            saveLearnedFacts(updated)
-                        },
-                        onClearAllFacts = {
-                            learnedFacts = emptyList()
-                            saveLearnedFacts(emptyList())
-                        },
                         onUpdateDigest = {
                             conversationDigest = it
                             saveConversationDigest(it)
@@ -6456,11 +6768,11 @@ fun MoneyPlanScreen(
     person2Items: List<CashflowItem>,
     isWealthHidden: Boolean = false,
     isPartnerLoggedIn: Boolean = false,
-    onAddPerson1: (String, Double, String) -> Unit,
-    onEditPerson1: (String, String, Double, String) -> Unit,
+    onAddPerson1: (String, Double, String, BillingCycle, Long?, String?) -> Unit,
+    onEditPerson1: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit,
     onDeletePerson1: (String) -> Unit,
-    onAddPerson2: (String, Double, String) -> Unit,
-    onEditPerson2: (String, String, Double, String) -> Unit,
+    onAddPerson2: (String, Double, String, BillingCycle, Long?, String?) -> Unit,
+    onEditPerson2: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit,
     onDeletePerson2: (String) -> Unit
 ) {
     var selectedPerson by rememberSaveable(isPartnerLoggedIn) {
@@ -6480,7 +6792,7 @@ fun MoneyPlanScreen(
     var showIncomeDialog by remember { mutableStateOf(false) }
     var showSavingsDialog by remember { mutableStateOf(false) }
     var editingSavingsPerson by remember { mutableIntStateOf(0) }
-    var sortBy by remember { mutableStateOf("Default") }
+    var sortBy by remember { mutableStateOf("Highest $") }
 
     fun maskVal(amt: Double, decimals: Int = 2): String =
         if (isWealthHidden) "$ ••••••" else formatCurrency(amt, decimals)
@@ -6496,6 +6808,16 @@ fun MoneyPlanScreen(
 
     val orbSpacing = 14.dp
     val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
+    val rawActiveList = if (selectedPerson == 0) person1Items else person2Items
+    val activeList = remember(rawActiveList, sortBy) {
+        when (sortBy) {
+            "Highest $" -> rawActiveList.sortedByDescending { abs(it.weeklyAmount) }
+            "Lowest $" -> rawActiveList.sortedBy { abs(it.weeklyAmount) }
+            "A-Z" -> rawActiveList.sortedBy { it.name.lowercase() }
+            else -> rawActiveList
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -6719,7 +7041,7 @@ fun MoneyPlanScreen(
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Sort By:", fontSize = 11.sp, color = SlateGray, fontWeight = FontWeight.Bold)
-                    listOf("Default", "Highest $", "Lowest $", "A-Z").forEach { option ->
+                    listOf("Highest $", "Lowest $", "A-Z", "Default").forEach { option ->
                         FilterChip(
                             selected = sortBy == option,
                             onClick = { sortBy = option },
@@ -6757,16 +7079,9 @@ fun MoneyPlanScreen(
             }
         }
 
-        val rawActiveList = if (selectedPerson == 0) person1Items else person2Items
-        val activeList = when (sortBy) {
-            "Highest $" -> rawActiveList.sortedBy { it.weeklyAmount }
-            "Lowest $" -> rawActiveList.sortedByDescending { it.weeklyAmount }
-            "A-Z" -> rawActiveList.sortedBy { it.name.lowercase() }
-            else -> rawActiveList
-        }
         val activeAccent = if (selectedPerson == 0) person1Color else person2Color
 
-        items(activeList, key = { it.id }) { item ->
+        items(activeList, key = { it.id }, contentType = { "expense_card" }) { item ->
             ExpenseItemCard(
                 item = item,
                 accentColor = activeAccent,
@@ -6789,13 +7104,13 @@ fun MoneyPlanScreen(
             initialItem = itemToEdit,
             defaultIsExpense = true,
             onDismiss = { showAddDialog = false; itemToEdit = null },
-            onConfirm = { name, amount, iconName ->
+            onConfirm = { name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId ->
                 if (isEdit) {
-                    if (selectedPerson == 0) onEditPerson1(itemToEdit!!.id, name, amount, iconName)
-                    else onEditPerson2(itemToEdit!!.id, name, amount, iconName)
+                    if (selectedPerson == 0) onEditPerson1(itemToEdit!!.id, name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
+                    else onEditPerson2(itemToEdit!!.id, name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
                 } else {
-                    if (selectedPerson == 0) onAddPerson1(name, amount, iconName)
-                    else onAddPerson2(name, amount, iconName)
+                    if (selectedPerson == 0) onAddPerson1(name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
+                    else onAddPerson2(name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
                 }
                 showAddDialog = false
                 itemToEdit = null
@@ -7004,13 +7319,13 @@ fun PropertiesScreen(
     appConfig: UserAppConfig,
     prop1WeeklyMortgage: Double,
     prop1Items: List<CashflowItem>,
-    onAddProp1: (String, Double, String) -> Unit,
-    onEditProp1: (String, String, Double, String) -> Unit,
+    onAddProp1: (String, Double, String, BillingCycle, Long?, String?) -> Unit,
+    onEditProp1: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit,
     onDeleteProp1: (String) -> Unit,
     prop2WeeklyMortgage: Double,
     prop2Items: List<CashflowItem>,
-    onAddProp2: (String, Double, String) -> Unit,
-    onEditProp2: (String, String, Double, String) -> Unit,
+    onAddProp2: (String, Double, String, BillingCycle, Long?, String?) -> Unit,
+    onEditProp2: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit,
     onDeleteProp2: (String) -> Unit,
     prop1MarketValue: Double,
     prop2MarketValue: Double,
@@ -7029,7 +7344,7 @@ fun PropertiesScreen(
     var itemToEdit by remember { mutableStateOf<CashflowItem?>(null) }
     var itemToDelete by remember { mutableStateOf<CashflowItem?>(null) }
     var showAddressEditDialog by remember { mutableStateOf(false) }
-    var sortBy by remember { mutableStateOf("Default") }
+    var sortBy by remember { mutableStateOf("Highest $") }
 
     fun maskVal(amt: Double, decimals: Int = 0): String = if (isWealthHidden) "$ ••••••" else formatCurrency(amt, decimals)
 
@@ -7045,6 +7360,16 @@ fun PropertiesScreen(
 
     val orbSpacing = 14.dp
     val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
+
+    val rawActiveList = if (selectedProperty == 0) prop1Items else prop2Items
+    val activeList = remember(rawActiveList, sortBy) {
+        when (sortBy) {
+            "Highest $" -> rawActiveList.sortedByDescending { abs(it.weeklyAmount) }
+            "Lowest $" -> rawActiveList.sortedBy { abs(it.weeklyAmount) }
+            "A-Z" -> rawActiveList.sortedBy { it.name.lowercase() }
+            else -> rawActiveList
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -7094,161 +7419,165 @@ fun PropertiesScreen(
             if (isProp1) {
                 val isRented = appConfig.isProperty1Rented
                 if (isRented) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    SwipeToRevealBox(
+                        onEdit = { showRentEditDialog = true }
                     ) {
-                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                                        IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
-                                            Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
-                                        }
-                                    }
-                                    Text("Rental Summary (Primary Home)", fontSize = 12.sp, color = SlateGray)
-                                }
-                                IconButton(onClick = { showRentEditDialog = true }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit Rent", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
-                                }
-                            }
-
-                            val currentRent = appConfig.primaryRentWeekly
-                            LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
-
-                            if (!appConfig.isProperty1Rented) {
-                                FilledTonalButton(
-                                    onClick = { showMgmtFeeDialog = true },
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.filledTonalButtonColors(
-                                        containerColor = BrandCoralPink,
-                                        contentColor = BrandForestDark
-                                    )
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Add Property Management Fee", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                            IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
+                                                Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                                            }
+                                        }
+                                        Text("Rental Summary (Primary Home)", fontSize = 12.sp, color = SlateGray)
+                                    }
+                                }
+
+                                val currentRent = appConfig.primaryRentWeekly
+                                LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
+
+                                if (!appConfig.isProperty1Rented) {
+                                    FilledTonalButton(
+                                        onClick = { showMgmtFeeDialog = true },
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.filledTonalButtonColors(
+                                            containerColor = BrandCoralPink,
+                                            contentColor = BrandForestDark
+                                        )
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Add Property Management Fee", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                    }
                                 }
                             }
                         }
                     }
                 } else {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    SwipeToRevealBox(
+                        onEdit = { showValueEditDialog = true }
                     ) {
-                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                                        IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
-                                            Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                            IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
+                                                Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                                            }
                                         }
+                                        Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
                                     }
-                                    Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
                                 }
-                                IconButton(onClick = { showValueEditDialog = true }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit Estimated Value", modifier = Modifier.size(16.dp), tint = BrandMintGreen)
-                                }
-                            }
 
-                            LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
-                            if (appConfig.showLoans) {
-                                LoanDetailRow("Synced Mortgage Balance", maskVal(liveBal, 0), highlightColor = BrandCoralPink)
+                                LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
+                                if (appConfig.showLoans) {
+                                    LoanDetailRow("Synced Mortgage Balance", maskVal(liveBal, 0), highlightColor = BrandCoralPink)
+                                }
+                                LoanDetailRow("Calculated Net Equity", maskVal(netEquity, 0), highlightColor = BrandWarmAmber)
                             }
-                            LoanDetailRow("Calculated Net Equity", maskVal(netEquity, 0), highlightColor = BrandWarmAmber)
                         }
                     }
                 }
             } else {
                 // Property 2: Investment Property — Show BOTH Valuation & Equity AND Rental Summary together in one unified view!
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    SwipeToRevealBox(
+                        onEdit = { showValueEditDialog = true }
                     ) {
-                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                                        IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
-                                            Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(activePropName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                            IconButton(onClick = { showAddressEditDialog = true }, modifier = Modifier.size(24.dp)) {
+                                                Icon(Icons.Default.Edit, contentDescription = "Edit Address", modifier = Modifier.size(14.dp), tint = SlateGray)
+                                            }
                                         }
+                                        Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
                                     }
-                                    Text("Valuation & Equity", fontSize = 12.sp, color = SlateGray)
                                 }
-                                IconButton(onClick = { showValueEditDialog = true }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit Estimated Value", modifier = Modifier.size(16.dp), tint = BrandMintGreen)
-                                }
-                            }
 
-                            LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
-                            if (appConfig.showLoans) {
-                                LoanDetailRow("Synced Mortgage Balance", maskVal(liveBal, 0), highlightColor = BrandCoralPink)
+                                LoanDetailRow("Est. Market Value", maskVal(estVal, 0), highlightColor = BrandMintGreen)
+                                if (appConfig.showLoans) {
+                                    LoanDetailRow("Synced Mortgage Balance", maskVal(liveBal, 0), highlightColor = BrandCoralPink)
+                                }
+                                LoanDetailRow("Calculated Net Equity", maskVal(netEquity, 0), highlightColor = BrandWarmAmber)
                             }
-                            LoanDetailRow("Calculated Net Equity", maskVal(netEquity, 0), highlightColor = BrandWarmAmber)
                         }
                     }
 
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    SwipeToRevealBox(
+                        onEdit = { showRentEditDialog = true }
                     ) {
-                        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("Investment Rental Summary", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
-                                    Text("Rental Income & Management", fontSize = 12.sp, color = SlateGray)
-                                }
-                                IconButton(onClick = { showRentEditDialog = true }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit Rent", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
-                                }
-                            }
-
-                            val currentRent = appConfig.secondaryRentWeekly
-                            LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
-
-                            if (!appConfig.isProperty1Rented) {
-                                FilledTonalButton(
-                                    onClick = { showMgmtFeeDialog = true },
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.filledTonalButtonColors(
-                                        containerColor = BrandCoralPink,
-                                        contentColor = BrandForestDark
-                                    )
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Add Property Management Fee", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("Investment Rental Summary", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        Text("Rental Income & Management", fontSize = 12.sp, color = SlateGray)
+                                    }
+                                }
+
+                                val currentRent = appConfig.secondaryRentWeekly
+                                LoanDetailRow("Weekly Gross Rent", maskVal(currentRent, 2), highlightColor = BrandMintGreen)
+
+                                if (!appConfig.isProperty1Rented) {
+                                    FilledTonalButton(
+                                        onClick = { showMgmtFeeDialog = true },
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.filledTonalButtonColors(
+                                            containerColor = BrandCoralPink,
+                                            contentColor = BrandForestDark
+                                        )
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Add Property Management Fee", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                                    }
                                 }
                             }
                         }
@@ -7298,9 +7627,9 @@ fun PropertiesScreen(
                     onDismiss = { showMgmtFeeDialog = false },
                     onConfirm = { name, amount ->
                         if (isProp1) {
-                            onAddProp1(name, amount, "Utility")
+                            onAddProp1(name, amount, "Utility", BillingCycle.WEEKLY, null, null)
                         } else {
-                            onAddProp2(name, amount, "Utility")
+                            onAddProp2(name, amount, "Utility", BillingCycle.WEEKLY, null, null)
                         }
                         showMgmtFeeDialog = false
                     }
@@ -7355,7 +7684,7 @@ fun PropertiesScreen(
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Sort By:", fontSize = 11.sp, color = SlateGray, fontWeight = FontWeight.Bold)
-                    listOf("Default", "Highest $", "Lowest $", "A-Z").forEach { option ->
+                    listOf("Highest $", "Lowest $", "A-Z", "Default").forEach { option ->
                         FilterChip(
                             selected = sortBy == option,
                             onClick = { sortBy = option },
@@ -7425,16 +7754,9 @@ fun PropertiesScreen(
             }
         }
 
-        val rawActiveList = if (selectedProperty == 0) prop1Items else prop2Items
-        val activeList = when (sortBy) {
-            "Highest $" -> rawActiveList.sortedBy { it.weeklyAmount }
-            "Lowest $" -> rawActiveList.sortedByDescending { it.weeklyAmount }
-            "A-Z" -> rawActiveList.sortedBy { it.name.lowercase() }
-            else -> rawActiveList
-        }
         val activeAccent = BrandCoralPink
 
-        items(activeList, key = { it.id }) { item ->
+        items(activeList, key = { it.id }, contentType = { "property_expense_card" }) { item ->
             ExpenseItemCard(
                 item = item,
                 accentColor = if (item.weeklyAmount >= 0) BrandMintGreen else activeAccent,
@@ -7457,13 +7779,13 @@ fun PropertiesScreen(
             initialItem = itemToEdit,
             defaultIsExpense = true,
             onDismiss = { showAddDialog = false; itemToEdit = null },
-            onConfirm = { name, amount, iconName ->
+            onConfirm = { name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId ->
                 if (isEdit) {
-                    if (selectedProperty == 0) onEditProp1(itemToEdit!!.id, name, amount, iconName)
-                    else onEditProp2(itemToEdit!!.id, name, amount, iconName)
+                    if (selectedProperty == 0) onEditProp1(itemToEdit!!.id, name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
+                    else onEditProp2(itemToEdit!!.id, name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
                 } else {
-                    if (selectedProperty == 0) onAddProp1(name, amount, iconName)
-                    else onAddProp2(name, amount, iconName)
+                    if (selectedProperty == 0) onAddProp1(name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
+                    else onAddProp2(name, amount, iconName, billingCycle, nextDueDateMillis, linkedAssetId)
                 }
                 showAddDialog = false
                 itemToEdit = null
@@ -7732,7 +8054,7 @@ fun LoansAndOffsetScreen(
                     }
 
                     LoanDetailRow("Original Loan Amount (30 Yrs)", maskVal(activeLoan.originalLoanAmount, 0))
-                    LoanDetailRow("Start Balance (${activeLoan.startDateStr})", maskVal(activeLoan.startLoanBalance, 0))
+                    LoanDetailRow("Start Balance (${formatDisplayDate(activeLoan.startDateStr)})", maskVal(activeLoan.startLoanBalance, 0))
                     LoanDetailRow("Current Remaining Balance", maskVal(liveBalance, 0), highlightColor = BrandCoralPink)
                     LoanDetailRow("Offset Account Balance", maskVal(activeLoan.offsetBalance, 0), highlightColor = BrandMintGreen)
                     LoanDetailRow("Net Balance Charging Interest", maskVal(netBalanceChargingInterest, 0))
@@ -7969,8 +8291,7 @@ fun WhatIfScenarioScreen(
     financialContextSummary: String = "",
     onExecuteAiActions: (String) -> Pair<String, List<String>> = { it to emptyList() },
     learnedFacts: List<LearnedUserFact> = emptyList(),
-    conversationDigest: String = "",
-    onAddLearnedFact: (LearnedUserFact) -> Unit = {}
+    conversationDigest: String = ""
 ) {
     fun maskVal(valAmt: Double, decimals: Int = 0): String {
         return if (isWealthHidden) "$ ••••••" else formatCurrency(valAmt, decimals)
@@ -8032,6 +8353,7 @@ fun WhatIfScenarioScreen(
     var whatIfChatInput by remember { mutableStateOf("") }
     val whatIfChatHistory = remember { mutableStateListOf<ChatMessage>() }
     var isWhatIfAiLoading by remember { mutableStateOf(false) }
+    var showInfoDialog by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     val milestoneFingerprint = milestoneList.map {
@@ -8505,7 +8827,12 @@ fun WhatIfScenarioScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("Scenario Explorer", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Scenario Explorer", fontWeight = FontWeight.ExtraBold, fontSize = 16.sp)
+                            IconButton(onClick = { showInfoDialog = true }, modifier = Modifier.size(24.dp)) {
+                                Icon(Icons.AutoMirrored.Filled.HelpOutline, contentDescription = "Help", tint = BrandSkyBlue, modifier = Modifier.size(18.dp))
+                            }
+                        }
                         Text("Tap a square tile to test popular Australian scenarios", fontSize = 11.sp, color = SlateGray)
                     }
                     if (hasAnyChanges) {
@@ -9056,40 +9383,31 @@ fun WhatIfScenarioScreen(
                                 cLever.maxValue to fmtPreset(cLever.maxValue)
                             ).distinctBy { (it.first * 100).roundToInt() }
 
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f)),
-                                modifier = Modifier.fillMaxWidth()
+                            SwipeToRevealBox(
+                                onEdit = {
+                                    customLeverToEdit = cLever
+                                    showAddCustomLeverDialog = true
+                                },
+                                onDelete = { customLeverToDelete = cLever }
                             ) {
-                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = cLever.impactType.label,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = BrandCoralPink
-                                        )
-                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                            IconButton(
-                                                onClick = {
-                                                    customLeverToEdit = cLever
-                                                    showAddCustomLeverDialog = true
-                                                },
-                                                modifier = Modifier.size(26.dp)
-                                            ) {
-                                                Icon(Icons.Default.Edit, contentDescription = "Edit Custom Lever", tint = SlateGray, modifier = Modifier.size(14.dp))
-                                            }
-                                            IconButton(
-                                                onClick = { customLeverToDelete = cLever },
-                                                modifier = Modifier.size(26.dp)
-                                            ) {
-                                                Icon(Icons.Default.Delete, contentDescription = "Delete Custom Lever", tint = BrandCoralPink, modifier = Modifier.size(14.dp))
-                                            }
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                    border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.35f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = cLever.impactType.label,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                color = BrandCoralPink
+                                            )
                                             Switch(
                                                 checked = cLever.isEnabled,
                                                 onCheckedChange = { enabled ->
@@ -9097,23 +9415,23 @@ fun WhatIfScenarioScreen(
                                                 }
                                             )
                                         }
-                                    }
 
-                                    WhatIfInteractiveLeverCard(
-                                        title = cLever.title,
-                                        subtitle = "Range: ${fmtPreset(cLever.minValue)} to ${fmtPreset(cLever.maxValue)} (${cLever.impactType.unitSuffix})",
-                                        value = cLever.currentValue,
-                                        valueRange = cLever.minValue..cLever.maxValue,
-                                        stepSize = cLever.stepSize,
-                                        isPercentage = isRateType,
-                                        unitSuffix = cLever.impactType.unitSuffix,
-                                        accentColor = if (cLever.isEnabled) BrandMintGreen else SlateGray,
-                                        presets = customPresets,
-                                        onValueChange = { newVal ->
-                                            activeScenarioId = "custom"
-                                            customLevers[idx] = cLever.copy(currentValue = newVal, isEnabled = true)
-                                        }
-                                    )
+                                        WhatIfInteractiveLeverCard(
+                                            title = cLever.title,
+                                            subtitle = "Range: ${fmtPreset(cLever.minValue)} to ${fmtPreset(cLever.maxValue)} (${cLever.impactType.unitSuffix})",
+                                            value = cLever.currentValue,
+                                            valueRange = cLever.minValue..cLever.maxValue,
+                                            stepSize = cLever.stepSize,
+                                            isPercentage = isRateType,
+                                            unitSuffix = cLever.impactType.unitSuffix,
+                                            accentColor = if (cLever.isEnabled) BrandMintGreen else SlateGray,
+                                            presets = customPresets,
+                                            onValueChange = { newVal ->
+                                                activeScenarioId = "custom"
+                                                customLevers[idx] = cLever.copy(currentValue = newVal, isEnabled = true)
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -9199,61 +9517,52 @@ fun WhatIfScenarioScreen(
                         }
                     } else {
                         milestoneList.forEachIndexed { index, milestone ->
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .clickable { milestoneList[index] = milestone.copy(isEnabled = !milestone.isEnabled) },
-                                color = if (milestone.isEnabled) milestone.category.defaultColor.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant,
-                                border = BorderStroke(1.dp, if (milestone.isEnabled) milestone.category.defaultColor else SlateGray.copy(alpha = 0.3f)),
-                                shape = RoundedCornerShape(14.dp)
+                            SwipeToRevealBox(
+                                onEdit = { milestoneToEdit = milestone },
+                                onDelete = { milestoneToDelete = milestone }
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .clickable { milestoneList[index] = milestone.copy(isEnabled = !milestone.isEnabled) },
+                                    color = if (milestone.isEnabled) milestone.category.defaultColor.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant,
+                                    border = BorderStroke(1.dp, if (milestone.isEnabled) milestone.category.defaultColor else SlateGray.copy(alpha = 0.3f)),
+                                    shape = RoundedCornerShape(14.dp)
                                 ) {
                                     Row(
-                                        modifier = Modifier.weight(1f),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                        modifier = Modifier.padding(12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Surface(
-                                            shape = CircleShape,
-                                            color = milestone.category.defaultColor,
-                                            modifier = Modifier.size(36.dp)
+                                        Row(
+                                            modifier = Modifier.weight(1f),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                                         ) {
-                                            Icon(milestone.category.icon, contentDescription = null, tint = BrandForestDark, modifier = Modifier.padding(8.dp))
-                                        }
-                                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                            Text(milestone.title, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                            val details = buildList {
-                                                add("Yr ${milestone.startYear}")
-                                                if (milestone.weeklyCashflowImpact != 0.0) {
-                                                    add("${if (milestone.weeklyCashflowImpact > 0) "+" else ""}$${milestone.weeklyCashflowImpact.toInt()}/wk (${milestone.durationYears}y)")
-                                                }
-                                                if (milestone.assetImpact != 0.0) {
-                                                    add("Assets: ${if (milestone.assetImpact > 0) "+" else ""}${formatCurrency(milestone.assetImpact, 0)}")
-                                                }
-                                                if (milestone.liabilityImpact > 0.0) {
-                                                    add("Loan: +${formatCurrency(milestone.liabilityImpact, 0)}")
-                                                }
-                                            }.joinToString(" • ")
-                                            Text(details, fontSize = 11.sp, color = SlateGray)
-                                        }
-                                    }
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                                        IconButton(
-                                            onClick = { milestoneToEdit = milestone },
-                                            modifier = Modifier.size(32.dp)
-                                        ) {
-                                            Icon(Icons.Default.Edit, contentDescription = "Edit Milestone", tint = SlateGray, modifier = Modifier.size(16.dp))
-                                        }
-                                        IconButton(
-                                            onClick = { milestoneToDelete = milestone },
-                                            modifier = Modifier.size(32.dp)
-                                        ) {
-                                            Icon(Icons.Default.Delete, contentDescription = "Delete Milestone", tint = BrandCoralPink, modifier = Modifier.size(16.dp))
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = milestone.category.defaultColor,
+                                                modifier = Modifier.size(36.dp)
+                                            ) {
+                                                Icon(milestone.category.icon, contentDescription = null, tint = BrandForestDark, modifier = Modifier.padding(8.dp))
+                                            }
+                                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                Text(milestone.title, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                                val details = buildList {
+                                                    add("Yr ${milestone.startYear}")
+                                                    if (milestone.weeklyCashflowImpact != 0.0) {
+                                                        add("${if (milestone.weeklyCashflowImpact > 0) "+" else ""}$${milestone.weeklyCashflowImpact.toInt()}/wk (${milestone.durationYears}y)")
+                                                    }
+                                                    if (milestone.assetImpact != 0.0) {
+                                                        add("Assets: ${if (milestone.assetImpact > 0) "+" else ""}${formatCurrency(milestone.assetImpact, 0)}")
+                                                    }
+                                                    if (milestone.liabilityImpact > 0.0) {
+                                                        add("Loan: +${formatCurrency(milestone.liabilityImpact, 0)}")
+                                                    }
+                                                }.joinToString(" • ")
+                                                Text(details, fontSize = 11.sp, color = SlateGray)
+                                            }
                                         }
                                         Switch(
                                             checked = milestone.isEnabled,
@@ -9387,6 +9696,7 @@ fun WhatIfScenarioScreen(
 
                                         var streamMessageAdded = false
                                         var botMessageIndex = -1
+                                        var lastStreamUiUpdateMs = 0L
 
                                         val rawReply = AiAssistantManager.askGeminiAssistant(
                                             prompt = q,
@@ -9395,23 +9705,27 @@ fun WhatIfScenarioScreen(
                                             learnedFacts = learnedFacts,
                                             longTermConversationDigest = conversationDigest,
                                             onPartialText = { partialSoFar ->
-                                                withContext(Dispatchers.Main) {
-                                                    val streamClean = cleanMarkdownText(
-                                                        partialSoFar
-                                                            .substringBefore("[[ACTION:")
-                                                            .substringBefore("[ACTION:")
-                                                    )
-                                                    if (streamClean.isNotBlank()) {
-                                                        if (!streamMessageAdded) {
-                                                            streamMessageAdded = true
-                                                            isWhatIfAiLoading = false
-                                                            whatIfChatHistory.add(ChatMessage(text = streamClean, isFromUser = false))
-                                                            botMessageIndex = whatIfChatHistory.lastIndex
-                                                        } else if (botMessageIndex in whatIfChatHistory.indices) {
-                                                            whatIfChatHistory[botMessageIndex] = whatIfChatHistory[botMessageIndex].copy(text = streamClean)
+                                                val now = System.currentTimeMillis()
+                                                if (!streamMessageAdded || now - lastStreamUiUpdateMs >= 40L) {
+                                                    lastStreamUiUpdateMs = now
+                                                    withContext(Dispatchers.Main) {
+                                                        val streamClean = cleanMarkdownText(
+                                                            partialSoFar
+                                                                .substringBefore("[[ACTION:")
+                                                                .substringBefore("[ACTION:")
+                                                        )
+                                                        if (streamClean.isNotBlank()) {
+                                                            if (!streamMessageAdded) {
+                                                                streamMessageAdded = true
+                                                                isWhatIfAiLoading = false
+                                                                whatIfChatHistory.add(ChatMessage(text = streamClean, isFromUser = false))
+                                                                botMessageIndex = whatIfChatHistory.lastIndex
+                                                            } else if (botMessageIndex in whatIfChatHistory.indices) {
+                                                                whatIfChatHistory[botMessageIndex] = whatIfChatHistory[botMessageIndex].copy(text = streamClean)
+                                                            }
+                                                            val updatedLastIdx = (whatIfListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                                                            whatIfListState.scrollToItem(updatedLastIdx)
                                                         }
-                                                        val updatedLastIdx = (whatIfListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-                                                        whatIfListState.scrollToItem(updatedLastIdx)
                                                     }
                                                 }
                                             }
@@ -9424,21 +9738,7 @@ fun WhatIfScenarioScreen(
                                         }
                                         isWhatIfAiLoading = false
                                         val updatedLastIdx = (whatIfListState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
-                                        whatIfListState.animateScrollToItem(updatedLastIdx)
-
-                                        // Background fact extraction to continually learn about user
-                                        coroutineScope.launch(Dispatchers.IO) {
-                                            val newFacts = AiAssistantManager.extractLearnedFactsFromTurn(
-                                                userMessage = q,
-                                                aiReply = cleanReply,
-                                                existingFacts = learnedFacts
-                                            )
-                                            if (newFacts.isNotEmpty()) {
-                                                withContext(Dispatchers.Main) {
-                                                    newFacts.forEach { onAddLearnedFact(it) }
-                                                }
-                                            }
-                                        }
+                                        whatIfListState.scrollToItem(updatedLastIdx)
                                     }
                                 }
                             },
@@ -9704,6 +10004,28 @@ fun WhatIfScenarioScreen(
                 }
             }
         }
+    }
+
+    if (showInfoDialog) {
+        AlertDialog(
+            onDismissRequest = { showInfoDialog = false },
+            title = { Text("How Projections Are Calculated", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("• Property Growth: Assumes 4% average annual capital growth.")
+                    Text("• Shares & Super: Assumes 7.5% annual average market return.")
+                    Text("• Cash & Savings: In Tenant / Renter mode, cash savings earn ~4.5% p.a. HISA interest. In Home Owner mode, cash sits in a mortgage offset account (saving mortgage interest rather than earning cash interest).")
+                    Text("• Wage & Rental Inflation: Automatically compounds wages and rental income by ~3% average annual growth.")
+                    Text("• Debt Paydown: Assumes standard amortisation paying down ~3.5% of remaining debt principal annually.")
+                    Text("• Status Quo vs What-If: Status Quo projects your current trajectory with baseline assumptions, while What-If layers in your custom levers, wage growth, rate shocks, and milestones.")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showInfoDialog = false }) {
+                    Text("Got It", fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                }
+            }
+        )
     }
 
     if (showAddCustomLeverDialog) {
@@ -10726,15 +11048,19 @@ fun TotalWealthScreen(
 
     val totalAssets = totalPropertyVal + totalSuperVal + totalSharesVal + totalOtherAssetsVal + totalOffsets + totalCashSavings
 
-    val p1AutoFortnights = getElapsedFortnightsSinceStart(prop1Loan.startDateStr)
-    val p1Schedule = generateAmortizationSchedule(prop1Loan, 780)
+    val p1AutoFortnights = remember(prop1Loan.startDateStr) { getElapsedFortnightsSinceStart(prop1Loan.startDateStr) }
+    val p1Schedule = remember(prop1Loan) { generateAmortizationSchedule(prop1Loan, 780) }
     val p1CurrentRow = p1Schedule.getOrNull(p1AutoFortnights.coerceIn(0, p1Schedule.size - 1)) ?: p1Schedule.first()
     val p1LiveBalance = if (appConfig.showLoans && !appConfig.isProperty1Rented) p1CurrentRow.closingBalance else 0.0
 
-    val p2AutoFortnights = getElapsedFortnightsSinceStart(prop2Loan.startDateStr)
-    val p2Schedule = generateAmortizationSchedule(prop2Loan, 780)
-    val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
-    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !appConfig.isProperty1Rented) p2CurrentRow.closingBalance else 0.0
+    val p2AutoFortnights = remember(prop2Loan.startDateStr) { getElapsedFortnightsSinceStart(prop2Loan.startDateStr) }
+    val p2Schedule = remember(prop2Loan, appConfig.hasSecondProperty) {
+        if (appConfig.hasSecondProperty) generateAmortizationSchedule(prop2Loan, 780) else emptyList()
+    }
+    val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, max(0, p2Schedule.size - 1)))
+    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !appConfig.isProperty1Rented) {
+        p2CurrentRow?.closingBalance ?: 0.0
+    } else 0.0
 
     val totalLiabilities = p1LiveBalance + p2LiveBalance
     val netWorth = totalAssets - totalLiabilities
@@ -11046,6 +11372,9 @@ fun TotalWealthScreen(
                             LoanDetailRow("${appConfig.property2Name} Offset", maskVal(prop2Loan.offsetBalance, 0))
                         }
                     }
+                    if (appConfig.isProperty1Rented && totalCashSavings > 0) {
+                        LoanDetailRow("Combined Cash Savings", maskVal(totalCashSavings, 0))
+                    }
                 }
             }
         }
@@ -11128,7 +11457,12 @@ fun SharesHoldingTimelineCard(
                 val wave1 = sin(progress * 3.8 * Math.PI + (seed % 7)) * 0.45
                 val wave2 = cos(progress * 6.2 * Math.PI + (seed % 11)) * 0.25
                 val noise = (wave1 + wave2) * (totalValue * 0.028) * (1f - progress)
-                val valAtPoint = if (i == count - 1) totalValue else (linear + noise).coerceAtLeast(0.0)
+                
+                val valAtPoint = when (i) {
+                    count - 1 -> totalValue
+                    0 -> startVal
+                    else -> (linear + noise).coerceAtLeast(0.0)
+                }
 
                 val pointDate = startDate.plusDays(((daysBack * progress).toLong()).coerceIn(0L, daysBack))
                 TimelinePoint(
@@ -11943,163 +12277,159 @@ fun ShareDetailView(
             val isGain = parcelGain >= 0
             val gainColor = if (isGain) BrandMintGreen else BrandCoralPink
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            SwipeToRevealBox(
+                onEdit = { onEditParcel(parcel) },
+                onDelete = { onDeleteParcel(parcel) }
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Surface(
-                                shape = RoundedCornerShape(6.dp),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(11.dp), tint = SlateGray)
-                                    Text(
-                                        formatParcelDate(parcel),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = ownerBadgeColor.copy(alpha = 0.18f),
-                                border = BorderStroke(1.dp, ownerBadgeColor.copy(alpha = 0.45f))
-                            ) {
-                                Text(
-                                    parcel.owner,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = ownerBadgeColor
-                                )
-                            }
-                        }
-
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { onEditParcel(parcel) }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit Transaction", tint = SlateGray, modifier = Modifier.size(15.dp))
-                            }
-                            IconButton(onClick = { onDeleteParcel(parcel) }, modifier = Modifier.size(28.dp)) {
-                                Icon(Icons.Default.DeleteOutline, contentDescription = "Delete Transaction", tint = BrandCoralRed, modifier = Modifier.size(15.dp))
-                            }
-                        }
-                    }
-
-                    // Dedicated Pricing & Valuation Capsule for Transaction
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                        border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
-                                Text("BOUGHT AT", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = SlateGray, letterSpacing = 0.5.sp)
-                                Text(
-                                    maskVal(parcel.purchasePrice, 2),
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                            Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
-                            Column {
-                                Text("UNITS", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = SlateGray, letterSpacing = 0.5.sp)
-                                Text(
-                                    formatShareUnits(parcel.units),
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                            Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
-                            Column {
-                                Text("COST", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = SlateGray, letterSpacing = 0.5.sp)
-                                Text(
-                                    maskVal(parcelCost, 2),
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                            }
-                            Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
-                            Column(horizontalAlignment = Alignment.End) {
-                                Text("CURRENT VALUE", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = sharesAccent, letterSpacing = 0.5.sp)
-                                Text(
-                                    maskVal(parcelVal, 2),
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = sharesAccent
-                                )
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(11.dp), tint = SlateGray)
+                                        Text(
+                                            formatParcelDate(parcel),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = ownerBadgeColor.copy(alpha = 0.18f),
+                                    border = BorderStroke(1.dp, ownerBadgeColor.copy(alpha = 0.45f))
+                                ) {
+                                    Text(
+                                        parcel.owner,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ownerBadgeColor
+                                    )
+                                }
                             }
                         }
-                    }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = if (parcel.purchasePrice > 0 && parcel.currentPrice > 0) {
-                                val diff = parcel.currentPrice - parcel.purchasePrice
-                                val diffPct = (diff / parcel.purchasePrice) * 100
-                                "Per share: ${if (diff >= 0) "+" else ""}${formatCurrency(diff, 2)} (${String.format(Locale.getDefault(), "%.1f", diffPct)}%)"
-                            } else "",
-                            fontSize = 10.5.sp,
-                            color = SlateGray,
-                            fontWeight = FontWeight.Medium
-                        )
-
+                        // Dedicated Pricing & Valuation Capsule for Transaction
                         Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = gainColor.copy(alpha = 0.14f),
-                            border = BorderStroke(0.8.dp, gainColor.copy(alpha = 0.35f))
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    if (isGain) Icons.Default.NorthEast else Icons.Default.SouthEast,
-                                    contentDescription = null,
-                                    tint = gainColor,
-                                    modifier = Modifier.size(11.dp)
-                                )
-                                Text(
-                                    if (isWealthHidden) "$ ••••••"
-                                    else "${if (isGain) "+" else ""}${formatCurrency(parcelGain, 2)} (${String.format(Locale.getDefault(), "%.1f", parcelGainPct)}%)",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isWealthHidden) MaterialTheme.colorScheme.onSurface else gainColor
-                                )
+                                Column {
+                                    Text("BOUGHT AT", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = SlateGray, letterSpacing = 0.5.sp)
+                                    Text(
+                                        maskVal(parcel.purchasePrice, 2),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
+                                Column {
+                                    Text("UNITS", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = SlateGray, letterSpacing = 0.5.sp)
+                                    Text(
+                                        formatShareUnits(parcel.units),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
+                                Column {
+                                    Text("COST", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = SlateGray, letterSpacing = 0.5.sp)
+                                    Text(
+                                        maskVal(parcelCost, 2),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text("CURRENT VALUE", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = sharesAccent, letterSpacing = 0.5.sp)
+                                    Text(
+                                        maskVal(parcelVal, 2),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = sharesAccent
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (parcel.purchasePrice > 0 && parcel.currentPrice > 0) {
+                                    val diff = parcel.currentPrice - parcel.purchasePrice
+                                    val diffPct = (diff / parcel.purchasePrice) * 100
+                                    "Per share: ${if (diff >= 0) "+" else ""}${formatCurrency(diff, 2)} (${String.format(Locale.getDefault(), "%.1f", diffPct)}%)"
+                                } else "",
+                                fontSize = 10.5.sp,
+                                color = SlateGray,
+                                fontWeight = FontWeight.Medium
+                            )
+
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = gainColor.copy(alpha = 0.14f),
+                                border = BorderStroke(0.8.dp, gainColor.copy(alpha = 0.35f))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Icon(
+                                        if (isGain) Icons.Default.NorthEast else Icons.Default.SouthEast,
+                                        contentDescription = null,
+                                        tint = gainColor,
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                    Text(
+                                        if (isWealthHidden) "$ ••••••"
+                                        else "${if (isGain) "+" else ""}${formatCurrency(parcelGain, 2)} (${String.format(Locale.getDefault(), "%.1f", parcelGainPct)}%)",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isWealthHidden) MaterialTheme.colorScheme.onSurface else gainColor
+                                    )
+                                }
                             }
                         }
                     }
@@ -12505,8 +12835,6 @@ fun SuperAndSharesScreen(
                     }
                 } else {
                     items(groupedShares, key = { it.code }) { holding ->
-                        val isPrimaryOwner = holding.owners.size == 1 && holding.owners.first().equals(appConfig.person1Name, ignoreCase = true)
-                        val ownerBadgeColor = if (isPrimaryOwner) person1Color else person2Color
                         val isGain = holding.totalGainLoss >= 0
                         val gainColor = if (isGain) BrandMintGreen else BrandCoralPink
 
@@ -12817,55 +13145,51 @@ fun SuperAndSharesScreen(
                     val isPrimaryOwner = superAcc.owner.equals(appConfig.person1Name, ignoreCase = true)
                     val ownerBadgeColor = if (isPrimaryOwner) person1Color else person2Color
 
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                    SwipeToRevealBox(
+                        onEdit = { superToEdit = superAcc },
+                        onDelete = { superToDelete = superAcc }
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(14.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(38.dp)
-                                        .clip(CircleShape)
-                                        .background(ownerBadgeColor.copy(alpha = 0.2f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(Icons.Default.Savings, contentDescription = null, tint = ownerBadgeColor, modifier = Modifier.size(20.dp))
-                                }
-                                Spacer(Modifier.width(12.dp))
-                                Column {
-                                    Text(superAcc.fundName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                                    Surface(
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = ownerBadgeColor.copy(alpha = 0.15f),
-                                        border = BorderStroke(1.dp, ownerBadgeColor.copy(alpha = 0.5f))
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(14.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(38.dp)
+                                            .clip(CircleShape)
+                                            .background(ownerBadgeColor.copy(alpha = 0.2f)),
+                                        contentAlignment = Alignment.Center
                                     ) {
-                                        Text(
-                                            superAcc.owner,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = ownerBadgeColor
-                                        )
+                                        Icon(Icons.Default.Savings, contentDescription = null, tint = ownerBadgeColor, modifier = Modifier.size(20.dp))
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Column {
+                                        Text(superAcc.fundName, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = ownerBadgeColor.copy(alpha = 0.15f),
+                                            border = BorderStroke(1.dp, ownerBadgeColor.copy(alpha = 0.5f))
+                                        ) {
+                                            Text(
+                                                superAcc.owner,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ownerBadgeColor
+                                            )
+                                        }
                                     }
                                 }
-                            }
 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(maskVal(superAcc.balance, 0), fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                                Spacer(Modifier.width(6.dp))
-                                IconButton(onClick = { superToEdit = superAcc }, modifier = Modifier.size(32.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit", tint = SlateGray, modifier = Modifier.size(16.dp))
-                                }
-                                IconButton(onClick = { superToDelete = superAcc }, modifier = Modifier.size(32.dp)) {
-                                    Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = BrandCoralRed, modifier = Modifier.size(16.dp))
-                                }
                             }
                         }
                     }
@@ -13019,7 +13343,6 @@ fun OtherAssetsScreen(
     appConfig: UserAppConfig,
     person1Color: Color,
     person2Color: Color,
-
     otherAssetsList: List<OtherAsset>,
     isWealthHidden: Boolean = false,
     onAddOtherAsset: (String, String, Double) -> Unit,
@@ -13110,61 +13433,57 @@ fun OtherAssetsScreen(
             val isPrimaryOwner = asset.owner.equals(appConfig.person1Name, ignoreCase = true)
             val ownerBadgeColor = if (isPrimaryOwner) person1Color else person2Color
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(14.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            SwipeToRevealBox(
+                onEdit = { assetToEdit = asset },
+                onDelete = { assetToDelete = asset }
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(ownerBadgeColor.copy(alpha = 0.2f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                if (asset.name.contains("Car", ignoreCase = true) || asset.name.contains("Vehicle", ignoreCase = true))
-                                    Icons.Default.DirectionsCar else Icons.Default.AccountBalance,
-                                contentDescription = null,
-                                tint = ownerBadgeColor,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(asset.name, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = ownerBadgeColor.copy(alpha = 0.15f),
-                                border = BorderStroke(1.dp, ownerBadgeColor.copy(alpha = 0.5f))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(ownerBadgeColor.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    asset.owner,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = ownerBadgeColor
+                                Icon(
+                                    if (asset.name.contains("Car", ignoreCase = true) || asset.name.contains("Vehicle", ignoreCase = true))
+                                        Icons.Default.DirectionsCar else Icons.Default.AccountBalance,
+                                    contentDescription = null,
+                                    tint = ownerBadgeColor,
+                                    modifier = Modifier.size(20.dp)
                                 )
                             }
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(asset.name, fontWeight = FontWeight.Bold, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface)
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ownerBadgeColor.copy(alpha = 0.15f),
+                                    border = BorderStroke(1.dp, ownerBadgeColor.copy(alpha = 0.5f))
+                                ) {
+                                    Text(
+                                        asset.owner,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ownerBadgeColor
+                                    )
+                                }
+                            }
                         }
-                    }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(maskVal(asset.value, 0), fontWeight = FontWeight.ExtraBold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Spacer(Modifier.width(6.dp))
-                        IconButton(onClick = { assetToEdit = asset }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Default.Edit, contentDescription = "Edit", tint = SlateGray, modifier = Modifier.size(16.dp))
-                        }
-                        IconButton(onClick = { assetToDelete = asset }, modifier = Modifier.size(32.dp)) {
-                            Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = BrandCoralRed, modifier = Modifier.size(16.dp))
-                        }
                     }
                 }
             }
@@ -13214,6 +13533,209 @@ fun OtherAssetsScreen(
 // ============================================================================
 // SHARED COMPONENTS & DIALOGS (WITH COLOR-BLIND IN/OUT ARROWS)
 // ============================================================================
+@Composable
+fun SwipeToRevealBox(
+    onEdit: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val actionCount = (if (onEdit != null) 1 else 0) + (if (onDelete != null) 1 else 0)
+    if (actionCount == 0) {
+        Box(modifier = modifier) {
+            content()
+        }
+        return
+    }
+
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val revealState = LocalOrbRevealState.current
+    val orbKey = remember { Any() }
+    val isRevealed = revealState.activeOrbKey == orbKey
+
+    DisposableEffect(orbKey) {
+        onDispose {
+            if (revealState.activeOrbKey == orbKey) {
+                revealState.dismiss()
+            }
+        }
+    }
+
+    val revealWidthDp = (actionCount * 68 + (actionCount - 1) * 6 + 10).dp
+    val maxRevealPx = with(density) { revealWidthDp.toPx() }
+
+    val animatedOffsetX by animateFloatAsState(
+        targetValue = if (isRevealed) -maxRevealPx else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioLowBouncy,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "long_press_reveal_offset"
+    )
+
+    Box(modifier = modifier.fillMaxWidth()) {
+        // Revealed background action pills (Edit / Delete)
+        if (animatedOffsetX < -2f) {
+            Row(
+                modifier = Modifier
+                    .matchParentSize()
+                    .padding(start = 16.dp, end = 2.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .padding(vertical = 2.dp)
+                        .onGloballyPositioned { coords ->
+                            if (isRevealed && coords.isAttached) {
+                                revealState.activeActionTrayBounds = coords.boundsInRoot()
+                            }
+                        }
+                ) {
+                    if (onEdit != null) {
+                        Surface(
+                            onClick = {
+                                revealState.dismiss()
+                                onEdit()
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            color = BrandWarmAmber.copy(alpha = 0.22f),
+                            border = BorderStroke(1.dp, BrandWarmAmber.copy(alpha = 0.65f)),
+                            modifier = Modifier
+                                .width(66.dp)
+                                .fillMaxHeight()
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(4.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Edit,
+                                    contentDescription = "Edit",
+                                    tint = BrandWarmAmber,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "Edit",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = BrandWarmAmber
+                                )
+                            }
+                        }
+                    }
+
+                    if (onDelete != null) {
+                        Surface(
+                            onClick = {
+                                revealState.dismiss()
+                                onDelete()
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            color = BrandCoralRed.copy(alpha = 0.22f),
+                            border = BorderStroke(1.dp, BrandCoralRed.copy(alpha = 0.70f)),
+                            modifier = Modifier
+                                .width(66.dp)
+                                .fillMaxHeight()
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(4.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.DeleteOutline,
+                                    contentDescription = "Delete",
+                                    tint = BrandCoralRed,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    text = "Delete",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = BrandCoralRed
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Foreground card: press & hold (long-press) to reveal Edit/Delete without blocking horizontal/vertical scrolling
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(animatedOffsetX.roundToInt(), 0) }
+                .pointerInput(orbKey, revealState) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        val touchSlop = viewConfiguration.touchSlop
+                        val holdTimeoutMs = 380L
+                        var movedPastSlop = false
+                        var releasedEarly = false
+
+                        val heldUntilTimeout = withTimeoutOrNull(holdTimeoutMs) {
+                            while (true) {
+                                val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                    ?: event.changes.firstOrNull()
+                                if (change == null || !change.pressed) {
+                                    releasedEarly = true
+                                    break
+                                }
+                                if ((change.position - down.position).getDistance() > touchSlop) {
+                                    movedPastSlop = true
+                                    break
+                                }
+                            }
+                        } == null
+
+                        if (heldUntilTimeout && !movedPastSlop && !releasedEarly) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (revealState.activeOrbKey == orbKey) {
+                                revealState.dismiss()
+                            } else {
+                                revealState.activeOrbKey = orbKey
+                            }
+                            do {
+                                val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                                event.changes.forEach { it.consume() }
+                            } while (event.changes.any { it.pressed })
+                        }
+                    }
+                }
+        ) {
+            content()
+
+            // Tap shifted card to close reveal tray
+            if (isRevealed) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            revealState.dismiss()
+                        }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun ConfirmDeleteDialog(
     title: String,
@@ -13281,88 +13803,205 @@ fun ExpenseItemCard(
     onEdit: (() -> Unit)? = null,
     onDelete: (() -> Unit)?
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                val iconVector = when (item.iconName) {
-                    "Home" -> Icons.Default.Home
-                    "Food" -> Icons.Default.Restaurant
-                    "Car" -> Icons.Default.DirectionsCar
-                    "Shopping" -> Icons.Default.ShoppingCart
-                    "Health" -> Icons.Default.Favorite
-                    "Utility" -> Icons.Default.Bolt
-                    "Entertainment" -> Icons.Default.Movie
-                    else -> Icons.Default.AttachMoney
-                }
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(accentColor.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(iconVector, contentDescription = null, tint = accentColor, modifier = Modifier.size(20.dp))
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = item.name,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (!item.customSubtitle.isNullOrBlank()) {
-                        Text(
-                            text = item.customSubtitle,
-                            fontSize = 11.sp,
-                            color = SlateGray,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    } else if (item.isLockedMortgageOrPropertyLink) {
-                        Text(
-                            text = "Auto-synced across Property & Loan modules",
-                            fontSize = 11.sp,
-                            color = SlateGray
-                        )
-                    }
-                }
-            }
+    val batteryEnabled = item.isBatteryEnabled
+    val readyToPay = item.isReadyToPay
+    val progress = if (batteryEnabled) {
+        val animatedProgress by animateFloatAsState(
+            targetValue = item.chargeProgress,
+            animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing),
+            label = "battery_charge_progress"
+        )
+        animatedProgress
+    } else {
+        0f
+    }
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                CashflowDirectionAmount(
-                    amount = item.weeklyAmount,
-                    suffix = "/wk",
-                    decimals = 2,
-                    isWealthHidden = isWealthHidden,
-                    fontSize = 14
-                )
-                if (onEdit != null) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    IconButton(onClick = onEdit, modifier = Modifier.size(30.dp)) {
-                        Icon(Icons.Default.Edit, contentDescription = "Edit", tint = SlateGray, modifier = Modifier.size(17.dp))
+    val readyBorderGlowAlpha = if (readyToPay) {
+        val infiniteTransition = rememberInfiniteTransition(label = "ready_glow_transition")
+        val animatedAlpha by infiniteTransition.animateFloat(
+            initialValue = 0.45f,
+            targetValue = 1.0f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1000, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "ready_glow_alpha"
+        )
+        animatedAlpha
+    } else {
+        0f
+    }
+
+    val batteryAccent = if (readyToPay) BrandMintGreen else accentColor
+
+    SwipeToRevealBox(
+        onEdit = onEdit,
+        onDelete = onDelete
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+            border = when {
+                readyToPay -> BorderStroke(1.8.dp, batteryAccent.copy(alpha = readyBorderGlowAlpha))
+                batteryEnabled -> BorderStroke(1.dp, accentColor.copy(alpha = 0.35f))
+                else -> null
+            }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = if (batteryEnabled) 10.dp else 12.dp),
+                verticalArrangement = Arrangement.spacedBy(if (batteryEnabled) 6.dp else 10.dp)
+            ) {
+                // Top Row: Icon + Name on left, Weekly Amount on right (swipe left for Edit/Delete)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        val iconVector = when (item.iconName) {
+                            "Home" -> Icons.Default.Home
+                            "Food" -> Icons.Default.Restaurant
+                            "Car" -> Icons.Default.DirectionsCar
+                            "Shopping" -> Icons.Default.ShoppingCart
+                            "Health" -> Icons.Default.Favorite
+                            "Utility" -> Icons.Default.Bolt
+                            "Entertainment" -> Icons.Default.Movie
+                            else -> Icons.Default.AttachMoney
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(accentColor.copy(alpha = 0.18f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(iconVector, contentDescription = null, tint = accentColor, modifier = Modifier.size(20.dp))
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = item.name,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (!item.customSubtitle.isNullOrBlank()) {
+                                Text(
+                                    text = item.customSubtitle,
+                                    fontSize = 11.sp,
+                                    color = SlateGray,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            } else if (item.isLockedMortgageOrPropertyLink) {
+                                Text(
+                                    text = "Auto-synced across Property & Loan modules",
+                                    fontSize = 11.sp,
+                                    color = SlateGray
+                                )
+                            }
+                        }
                     }
+
+                    CashflowDirectionAmount(
+                        amount = item.weeklyAmount,
+                        suffix = "/wk",
+                        decimals = 2,
+                        isWealthHidden = isWealthHidden,
+                        fontSize = 14
+                    )
                 }
-                if (onDelete != null) {
-                    Spacer(modifier = Modifier.width(2.dp))
-                    IconButton(onClick = onDelete, modifier = Modifier.size(30.dp)) {
-                        Icon(Icons.Default.DeleteOutline, contentDescription = "Delete", tint = BrandCoralRed, modifier = Modifier.size(17.dp))
+
+                // Bottom Section: Sleek, ultra-compact Battery strip (minimal height, no top-row shift)
+                if (batteryEnabled) {
+                    val pctInt = (item.chargeProgress * 100).toInt()
+                    val bankedStr = if (isWealthHidden) {
+                        "$••• / $••• banked"
+                    } else {
+                        "${formatCurrency(item.accruedAmount, 0)} / ${formatCurrency(item.cycleTargetAmount, 0)} banked"
+                    }
+                    val dueInText = when {
+                        item.daysUntilDue <= 0L -> "Due today"
+                        item.daysUntilDue == 1L -> "Due in 1d"
+                        item.daysUntilDue < 14L -> "Due in ${item.daysUntilDue}d"
+                        else -> "Due in ${item.weeksUntilDue}w"
+                    }
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(3.5.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = batteryAccent.copy(alpha = 0.18f),
+                                    border = BorderStroke(0.6.dp, batteryAccent.copy(alpha = 0.45f))
+                                ) {
+                                    Text(
+                                        text = item.billingCycle.label.uppercase(),
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                        fontSize = 8.5.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = batteryAccent,
+                                        letterSpacing = 0.4.sp
+                                    )
+                                }
+                                Text(
+                                    text = bankedStr,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                                )
+                            }
+
+                            Text(
+                                text = if (readyToPay) "⚡ Ready • $dueInText" else "$pctInt% • $dueInText",
+                                fontSize = 10.5.sp,
+                                fontWeight = if (readyToPay) FontWeight.ExtraBold else FontWeight.SemiBold,
+                                color = if (readyToPay) BrandMintGreen else batteryAccent.copy(alpha = 0.92f)
+                            )
+                        }
+
+                        // Sleek Thin Progress Bar
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.5.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color.Black.copy(alpha = 0.32f))
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(progress.coerceIn(0.03f, 1f))
+                                    .clip(RoundedCornerShape(50))
+                                    .background(
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                batteryAccent.copy(alpha = 0.85f),
+                                                lerp(batteryAccent, Color.White, 0.22f)
+                                            )
+                                        )
+                                    )
+                            )
+                        }
                     }
                 }
             }
@@ -13376,12 +14015,49 @@ fun AddCashflowDialog(
     initialItem: CashflowItem? = null,
     defaultIsExpense: Boolean,
     onDismiss: () -> Unit,
-    onConfirm: (String, Double, String) -> Unit
+    onConfirm: (String, Double, String, BillingCycle, Long?, String?) -> Unit
 ) {
+    fun formatCleanAmount(amt: Double): String {
+        if (amt <= 0.0) return ""
+        return if (abs(amt - amt.roundToInt()) < 0.01) {
+            amt.roundToInt().toString()
+        } else {
+            String.format(Locale.US, "%.2f", amt).trimEnd('0').trimEnd('.')
+        }
+    }
+
+    val zoneId = remember { ZoneId.systemDefault() }
+    val dateFormatter = remember { DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()) }
+
     var name by remember(initialItem) { mutableStateOf(initialItem?.name ?: "") }
-    var amountStr by remember(initialItem) { mutableStateOf(initialItem?.weeklyAmount?.let { abs(it).toString() } ?: "") }
-    var isExpense by remember(initialItem) { mutableStateOf(initialItem?.let { it.weeklyAmount < 0 } ?: defaultIsExpense) }
-    var frequency by remember { mutableIntStateOf(0) }
+    var selectedCycle by remember(initialItem) {
+        mutableStateOf(initialItem?.billingCycle ?: BillingCycle.WEEKLY)
+    }
+    var amountStr by remember(initialItem) {
+        val initAmt = if (initialItem != null) {
+            if (initialItem.billingCycle != BillingCycle.WEEKLY) {
+                initialItem.cycleTargetAmount
+            } else {
+                abs(initialItem.weeklyAmount)
+            }
+        } else 0.0
+        mutableStateOf(formatCleanAmount(initAmt))
+    }
+    var isExpense by remember(initialItem) {
+        mutableStateOf(initialItem?.let { it.weeklyAmount < 0 } ?: defaultIsExpense)
+    }
+    var nextDueDateMillis by remember(initialItem) {
+        mutableStateOf(initialItem?.nextDueDateEpochMillis)
+    }
+    var dueInWeeksInput by remember(initialItem) {
+        val initWeeks = if (initialItem != null && initialItem.isBatteryEnabled) {
+            initialItem.weeksUntilDue.toString()
+        } else {
+            ""
+        }
+        mutableStateOf(initWeeks)
+    }
+    var showDatePickerModal by remember { mutableStateOf(false) }
 
     val availableIcons = listOf(
         "Default" to Icons.Default.AttachMoney,
@@ -13403,14 +14079,19 @@ fun AddCashflowDialog(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Description (e.g. Strata, Gym, Rent)") },
+                    label = { Text("Description (e.g. Strata, Rego, Council Rates)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
                     value = amountStr,
                     onValueChange = { amountStr = it },
-                    label = { Text("Amount ($)") },
+                    label = {
+                        Text(
+                            if (selectedCycle == BillingCycle.WEEKLY) "Weekly Amount ($)"
+                            else "${selectedCycle.label} Bill Target ($)"
+                        )
+                    },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
@@ -13430,21 +14111,167 @@ fun AddCashflowDialog(
                         label = { Text("Income In (+)") }
                     )
                 }
-                Text("Frequency (auto-converts to Weekly):", fontSize = 12.sp, color = SlateGray)
+                Text(
+                    text = "Billing Cycle (auto-converts to $/wk):",
+                    fontSize = 12.sp,
+                    color = SlateGray
+                )
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    val frequencies = listOf("Weekly", "Fortnight", "Monthly", "Quarterly", "Yearly")
-                    itemsIndexed(frequencies) { index, label ->
+                    items(BillingCycle.entries) { cycle ->
                         FilterChip(
-                            selected = frequency == index,
-                            onClick = { frequency = index },
-                            label = { Text(label, fontSize = 11.sp) }
+                            selected = selectedCycle == cycle,
+                            onClick = {
+                                if (selectedCycle != cycle) {
+                                    val currentTyped = abs(amountStr.toDoubleOrNull() ?: 0.0)
+                                    if (initialItem != null && currentTyped > 0.0) {
+                                        val currentWeekly = currentTyped / selectedCycle.cycleWeeks
+                                        val newTarget = currentWeekly * cycle.cycleWeeks
+                                        amountStr = formatCleanAmount(newTarget)
+                                    }
+                                    selectedCycle = cycle
+                                    if (cycle != BillingCycle.WEEKLY && isExpense && (nextDueDateMillis == null || nextDueDateMillis!! <= 0L)) {
+                                        val defaultDue = LocalDate.now(zoneId).plusDays(cycle.cycleDays)
+                                        nextDueDateMillis = defaultDue.atStartOfDay(zoneId).toInstant().toEpochMilli()
+                                        dueInWeeksInput = (cycle.cycleDays / 7L).toString()
+                                    }
+                                }
+                            },
+                            label = { Text(cycle.label, fontSize = 11.sp) }
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+
+                AnimatedVisibility(visible = isExpense && selectedCycle != BillingCycle.WEEKLY) {
+                    val effectiveDueMillis = nextDueDateMillis ?: remember(selectedCycle) {
+                        LocalDate.now(zoneId).plusDays(selectedCycle.cycleDays)
+                            .atStartOfDay(zoneId).toInstant().toEpochMilli()
+                    }
+                    val dueLocalDate = remember(effectiveDueMillis) {
+                        try {
+                            Instant.ofEpochMilli(effectiveDueMillis).atZone(zoneId).toLocalDate()
+                        } catch (_: Exception) {
+                            LocalDate.now(zoneId).plusDays(selectedCycle.cycleDays)
+                        }
+                    }
+                    val daysRemaining = remember(dueLocalDate) {
+                        ChronoUnit.DAYS.between(LocalDate.now(zoneId), dueLocalDate).coerceAtLeast(0L)
+                    }
+                    val weeksRemaining = (daysRemaining / 7L).toInt()
+                    val rawAmt = abs(amountStr.toDoubleOrNull() ?: 0.0)
+                    val previewWeekly = if (selectedCycle.cycleWeeks > 0.0) rawAmt / selectedCycle.cycleWeeks else rawAmt
+                    val previewProgress = remember(daysRemaining, selectedCycle) {
+                        ((selectedCycle.cycleDays - daysRemaining).toFloat() / selectedCycle.cycleDays.toFloat()).coerceIn(0f, 1f)
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = BrandMintGreen.copy(alpha = 0.12f),
+                        border = BorderStroke(1.dp, BrandMintGreen.copy(alpha = 0.40f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Due in ${if (daysRemaining < 14L) "${daysRemaining}d" else "${weeksRemaining}w"} • ${(previewProgress * 100).toInt()}% banked",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = BrandMintGreen
+                                )
+                                if (rawAmt > 0.0) {
+                                    Text(
+                                        text = "${formatCurrency(previewWeekly, 2)}/wk",
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = BrandWarmAmber
+                                    )
+                                }
+                            }
+
+                            // Quick "Due in ..." weeks input + Calendar picker side-by-side
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = dueInWeeksInput,
+                                    onValueChange = { input ->
+                                        val filtered = input.filter { it.isDigit() }.take(3)
+                                        dueInWeeksInput = filtered
+                                        val wks = filtered.toLongOrNull()
+                                        if (wks != null) {
+                                            val newDate = LocalDate.now(zoneId).plusDays(wks * 7L)
+                                            nextDueDateMillis = newDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
+                                        }
+                                    },
+                                    label = { Text("Due in (wks)", fontSize = 11.sp) },
+                                    placeholder = { Text("${weeksRemaining}w") },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    singleLine = true,
+                                    modifier = Modifier.weight(0.45f)
+                                )
+
+                                OutlinedButton(
+                                    onClick = { showDatePickerModal = true },
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier.weight(0.55f),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.DateRange,
+                                        contentDescription = "Select Next Due Date",
+                                        tint = BrandCoralPink,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = dueLocalDate.format(dateFormatter),
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            // Quick-select "Due in ..." preset chips
+                            val maxPresetWeeks = (selectedCycle.cycleDays / 7L).toInt().coerceAtLeast(4)
+                            val presetWeeks = remember(selectedCycle) {
+                                listOf(1, 2, 4, 6, 8, 12, 26, 52)
+                                    .filter { it <= maxPresetWeeks }
+                                    .ifEmpty { listOf(1, 2, 4) }
+                            }
+                            LazyRow(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                items(presetWeeks) { wks ->
+                                    val isSelected = dueInWeeksInput == wks.toString() || (dueInWeeksInput.isEmpty() && weeksRemaining == wks)
+                                    FilterChip(
+                                        selected = isSelected,
+                                        onClick = {
+                                            dueInWeeksInput = wks.toString()
+                                            val newDate = LocalDate.now(zoneId).plusDays(wks * 7L)
+                                            nextDueDateMillis = newDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
+                                        },
+                                        label = { Text("Due in ${wks}w", fontSize = 10.5.sp) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(2.dp))
                 Text("Select Icon:", fontSize = 12.sp, color = SlateGray)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(availableIcons) { (iconName, iconVector) ->
@@ -13462,14 +14289,29 @@ fun AddCashflowDialog(
                 onClick = {
                     val raw = abs(amountStr.toDoubleOrNull() ?: 0.0)
                     if (name.isNotBlank() && raw > 0.0) {
-                        val weeklyVal = when (frequency) {
-                            1 -> raw / 2.0
-                            2 -> (raw * 12.0) / 52.0
-                            3 -> (raw * 4.0) / 52.0
-                            4 -> raw / 52.0
-                            else -> raw
+                        val weeklyVal = if (selectedCycle.cycleWeeks > 0.0) {
+                            raw / selectedCycle.cycleWeeks
+                        } else {
+                            raw
                         }
-                        onConfirm(name.trim(), if (isExpense) -weeklyVal else weeklyVal, selectedIcon)
+                        val finalCycle = if (isExpense) selectedCycle else BillingCycle.WEEKLY
+                        val finalDueMillis = if (isExpense && finalCycle != BillingCycle.WEEKLY) {
+                            nextDueDateMillis ?: LocalDate.now(zoneId)
+                                .plusDays(finalCycle.cycleDays)
+                                .atStartOfDay(zoneId)
+                                .toInstant()
+                                .toEpochMilli()
+                        } else {
+                            null
+                        }
+                        onConfirm(
+                            name.trim(),
+                            if (isExpense) -weeklyVal else weeklyVal,
+                            selectedIcon,
+                            finalCycle,
+                            finalDueMillis,
+                            null
+                        )
                     }
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = BrandCoralPink, contentColor = BrandForestDark)
@@ -13481,6 +14323,45 @@ fun AddCashflowDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+
+    if (showDatePickerModal) {
+        val initialMillis = nextDueDateMillis ?: LocalDate.now(zoneId)
+            .plusDays(selectedCycle.cycleDays)
+            .atStartOfDay(zoneId)
+            .toInstant()
+            .toEpochMilli()
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+        DatePickerDialog(
+            onDismissRequest = { showDatePickerModal = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { pickedUtcMillis ->
+                            val pickedLocalDate = Instant.ofEpochMilli(pickedUtcMillis)
+                                .atZone(ZoneId.of("UTC"))
+                                .toLocalDate()
+                            nextDueDateMillis = pickedLocalDate
+                                .atStartOfDay(zoneId)
+                                .toInstant()
+                                .toEpochMilli()
+                            val pickedDays = ChronoUnit.DAYS.between(LocalDate.now(zoneId), pickedLocalDate).coerceAtLeast(0L)
+                            dueInWeeksInput = (pickedDays / 7L).toString()
+                        }
+                        showDatePickerModal = false
+                    }
+                ) {
+                    Text("Confirm", fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePickerModal = false }) {
+                    Text("Cancel")
+                }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
 }
 
 @Composable
@@ -13542,6 +14423,7 @@ fun EditLoanConfigDialog(
     var startBalStr by remember { mutableStateOf(loan.startLoanBalance.toInt().toString()) }
     var offsetStr by remember { mutableStateOf(loan.offsetBalance.toInt().toString()) }
     var origLoanStr by remember { mutableStateOf(loan.originalLoanAmount.toInt().toString()) }
+    var showStartDatePicker by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -13592,13 +14474,27 @@ fun EditLoanConfigDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                OutlinedTextField(
-                    value = startDateStr,
-                    onValueChange = { startDateStr = it },
-                    label = { Text("Schedule Start Date (YYYY-MM-DD)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = startDateStr,
+                        onValueChange = { startDateStr = it },
+                        label = { Text("Schedule Start Date (DD/MM/YYYY)") },
+                        placeholder = { Text("DD/MM/YYYY") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedButton(
+                        onClick = { showStartDatePicker = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(Icons.Default.DateRange, contentDescription = "Pick Date", modifier = Modifier.size(16.dp), tint = BrandCoralPink)
+                    }
+                }
             }
         },
         confirmButton = {
@@ -13608,10 +14504,11 @@ fun EditLoanConfigDialog(
                     val newOffset = offsetStr.toDoubleOrNull() ?: loan.offsetBalance
                     val newStartBal = startBalStr.toDoubleOrNull() ?: loan.startLoanBalance
                     val newOrig = origLoanStr.toDoubleOrNull() ?: loan.originalLoanAmount
+                    val finalStartStr = startDateStr.trim().ifBlank { loan.startDateStr }
                     onSave(
                         loan.copy(
                             name = nameStr.trim().ifBlank { loan.name },
-                            startDateStr = startDateStr.trim().ifBlank { loan.startDateStr },
+                            startDateStr = finalStartStr,
                             interestRatePa = newRate,
                             offsetBalance = newOffset,
                             startLoanBalance = newStartBal,
@@ -13628,6 +14525,37 @@ fun EditLoanConfigDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+
+    if (showStartDatePicker) {
+        val initialDate = parseFlexibleDate(startDateStr) ?: LocalDate.now()
+        val initialMillis = initialDate.atStartOfDay(ZoneId.of("UTC")).toInstant().toEpochMilli()
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+        DatePickerDialog(
+            onDismissRequest = { showStartDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { pickedUtcMillis ->
+                            val pickedLocalDate = Instant.ofEpochMilli(pickedUtcMillis)
+                                .atZone(ZoneId.of("UTC"))
+                                .toLocalDate()
+                            startDateStr = pickedLocalDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
+                        }
+                        showStartDatePicker = false
+                    }
+                ) {
+                    Text("Confirm", fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStartDatePicker = false }) {
+                    Text("Cancel")
+                }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
 }
 
 @Composable
@@ -13714,9 +14642,11 @@ fun AddEditShareParcelDialog(
     }
     var purchaseDateStr by remember {
         mutableStateOf(
-            parcel?.purchaseDate?.ifBlank { null } ?: LocalDate.now().toString()
+            parcel?.purchaseDate?.ifBlank { null }?.let { formatDisplayDate(it) }
+                ?: LocalDate.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
         )
     }
+    var showPurchaseDatePicker by remember { mutableStateOf(false) }
     var isFetchingPrice by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -13815,12 +14745,22 @@ fun AddEditShareParcelDialog(
                     OutlinedTextField(
                         value = purchaseDateStr,
                         onValueChange = { purchaseDateStr = it },
-                        label = { Text("Purchase Date (YYYY-MM-DD)") },
+                        label = { Text("Purchase Date (DD/MM/YYYY)") },
+                        placeholder = { Text("DD/MM/YYYY") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedButton(
-                        onClick = { purchaseDateStr = LocalDate.now().toString() },
+                        onClick = { showPurchaseDatePicker = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(Icons.Default.DateRange, contentDescription = "Pick Date", modifier = Modifier.size(16.dp), tint = BrandPurple)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            purchaseDateStr = LocalDate.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
+                        },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
                         shape = RoundedCornerShape(10.dp)
                     ) {
@@ -13848,6 +14788,37 @@ fun AddEditShareParcelDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
+
+    if (showPurchaseDatePicker) {
+        val initialDate = parseFlexibleDate(purchaseDateStr) ?: LocalDate.now()
+        val initialMillis = initialDate.atStartOfDay(ZoneId.of("UTC")).toInstant().toEpochMilli()
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
+        DatePickerDialog(
+            onDismissRequest = { showPurchaseDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        datePickerState.selectedDateMillis?.let { pickedUtcMillis ->
+                            val pickedLocalDate = Instant.ofEpochMilli(pickedUtcMillis)
+                                .atZone(ZoneId.of("UTC"))
+                                .toLocalDate()
+                            purchaseDateStr = pickedLocalDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
+                        }
+                        showPurchaseDatePicker = false
+                    }
+                ) {
+                    Text("Confirm", fontWeight = FontWeight.Bold, color = BrandPurple)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPurchaseDatePicker = false }) {
+                    Text("Cancel")
+                }
+            }
+        ) {
+            DatePicker(state = datePickerState)
+        }
+    }
 }
 
 @Composable
@@ -14406,22 +15377,18 @@ fun AsxShareLogoBadge(
 @Composable
 fun FloatingAiAssistantWidget(
     financialContextSummary: String,
-    personName: String,
     messages: MutableList<ChatMessage>,
     learnedFacts: List<LearnedUserFact> = emptyList(),
     conversationDigest: String = "",
-    onAddImportedShares: (List<ShareParcel>) -> Unit,
     onExecuteAiActions: (String) -> Pair<String, List<String>> = { it to emptyList() },
-    onSaveMessages: (List<ChatMessage>) -> Unit = {},
-    onAddLearnedFact: (LearnedUserFact) -> Unit = {},
-    onRemoveLearnedFact: (String) -> Unit = {},
-    onClearAllFacts: () -> Unit = {},
     onUpdateDigest: (String) -> Unit = {}
 ) {
     var isExpanded by remember { mutableStateOf(false) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     var inputText by remember { mutableStateOf("") }
     var attachedBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var attachedFileContent by remember { mutableStateOf<String?>(null) }
@@ -14543,19 +15510,16 @@ fun FloatingAiAssistantWidget(
     }
 
     val currentFinancialContext by rememberUpdatedState(financialContextSummary)
-    val currentPersonName by rememberUpdatedState(personName)
-    val currentOnAddImportedShares by rememberUpdatedState(onAddImportedShares)
     val currentOnExecuteAiActions by rememberUpdatedState(onExecuteAiActions)
     val chatListState = rememberLazyListState()
     val isKeyboardOpen = WindowInsets.ime.getBottom(LocalDensity.current) > 0
 
-    // Always auto-scroll down to the latest message / AI answer whenever messages, keyboard, or loading state changes
-    LaunchedEffect(messages.size, isLoading, isExpanded, isKeyboardOpen) {
-        if (isExpanded) {
-            kotlinx.coroutines.delay(60.milliseconds)
+    // Scroll to bottom cleanly when the panel opens or keyboard state changes without fighting stream updates
+    LaunchedEffect(isExpanded, isKeyboardOpen) {
+        if (isExpanded && messages.isNotEmpty()) {
             val totalRendered = chatListState.layoutInfo.totalItemsCount
             val targetIdx = (if (totalRendered > 0) totalRendered - 1 else messages.lastIndex).coerceAtLeast(0)
-            runCatching { chatListState.animateScrollToItem(targetIdx) }
+            runCatching { chatListState.scrollToItem(targetIdx) }
         }
     }
 
@@ -14588,98 +15552,60 @@ fun FloatingAiAssistantWidget(
                     attachedFileName = fileNameToSend
                 )
             )
-            onSaveMessages(messages.toList())
             isLoading = true
 
             coroutineScope.launch {
+                runCatching { chatListState.scrollToItem(messages.lastIndex.coerceAtLeast(0)) }
+
                 var streamMessageAdded = false
                 var botMessageIndex = -1
+                var lastStreamUiUpdateMs = 0L
+
                 val onStreamUpdate: suspend (String) -> Unit = { partialSoFar ->
-                    withContext(Dispatchers.Main) {
-                        val streamClean = cleanMarkdownText(
-                            partialSoFar
-                                .substringBefore("[[ACTION:")
-                                .substringBefore("[ACTION:")
-                        )
-                        if (streamClean.isNotBlank()) {
-                            if (!streamMessageAdded) {
-                                streamMessageAdded = true
-                                isLoading = false
-                                messages.add(
-                                    ChatMessage(
-                                        text = streamClean,
-                                        isFromUser = false
+                    val now = System.currentTimeMillis()
+                    if (!streamMessageAdded || now - lastStreamUiUpdateMs >= 40L) {
+                        lastStreamUiUpdateMs = now
+                        withContext(Dispatchers.Main) {
+                            val streamClean = cleanMarkdownText(
+                                partialSoFar
+                                    .substringBefore("[[ACTION:")
+                                    .substringBefore("[ACTION:")
+                            )
+                            if (streamClean.isNotBlank()) {
+                                if (!streamMessageAdded) {
+                                    streamMessageAdded = true
+                                    isLoading = false
+                                    messages.add(
+                                        ChatMessage(
+                                            text = streamClean,
+                                            isFromUser = false
+                                        )
                                     )
-                                )
-                                botMessageIndex = messages.lastIndex
-                            } else if (botMessageIndex in messages.indices) {
-                                messages[botMessageIndex] = messages[botMessageIndex].copy(text = streamClean)
-                            }
-                            if (chatListState.layoutInfo.totalItemsCount > 0) {
-                                chatListState.scrollToItem(messages.lastIndex)
+                                    botMessageIndex = messages.lastIndex
+                                } else if (botMessageIndex in messages.indices) {
+                                    messages[botMessageIndex] = messages[botMessageIndex].copy(text = streamClean)
+                                }
+                                if (chatListState.layoutInfo.totalItemsCount > 0) {
+                                    chatListState.scrollToItem(messages.lastIndex)
+                                }
                             }
                         }
                     }
                 }
 
                 try {
-                    val appliedActions = mutableListOf<String>()
-                    var finalReply: String
-
-                    val wantsShareImport = bitmapToSend != null &&
-                            (question.contains("share", ignoreCase = true) ||
-                                    question.contains("pearler", ignoreCase = true) ||
-                                    question.contains("stock", ignoreCase = true) ||
-                                    question.contains("portfolio", ignoreCase = true))
-
-                    if (wantsShareImport) {
-                        val importedItems = AiAssistantManager.parsePearlerScreenshotWithAi(bitmapToSend)
-                        if (importedItems.isNotEmpty()) {
-                            val newParcels = importedItems.map { item ->
-                                ShareParcel(
-                                    id = "imported_${System.currentTimeMillis()}_${item.ticker}",
-                                    code = item.ticker,
-                                    owner = currentPersonName,
-                                    units = item.quantity,
-                                    purchasePrice = item.averagePrice,
-                                    currentPrice = if (item.averagePrice > 0.0) item.averagePrice else 10.0
-                                )
-                            }
-                            currentOnAddImportedShares(newParcels)
-                            appliedActions.add("Imported ${importedItems.size} share parcels (${importedItems.joinToString { it.ticker }})")
-                            finalReply = "I extracted ${importedItems.size} share parcels (${importedItems.joinToString { it.ticker }}) from your image and added them to your Shares tab."
-                        } else {
-                            val rawAi = AiAssistantManager.askGeminiAssistant(
-                                prompt = question,
-                                contextSummary = currentFinancialContext,
-                                conversationHistory = historySnapshot,
-                                bitmap = bitmapToSend,
-                                fileContent = fileContentToSend,
-                                fileName = fileNameToSend,
-                                learnedFacts = learnedFacts,
-                                longTermConversationDigest = conversationDigest,
-                                onPartialText = onStreamUpdate
-                            )
-                            val (cleaned, executed) = currentOnExecuteAiActions(rawAi)
-                            finalReply = cleaned
-                            appliedActions.addAll(executed)
-                        }
-                    } else {
-                        val rawAi = AiAssistantManager.askGeminiAssistant(
-                            prompt = question,
-                            contextSummary = currentFinancialContext,
-                            conversationHistory = historySnapshot,
-                            bitmap = bitmapToSend,
-                            fileContent = fileContentToSend,
-                            fileName = fileNameToSend,
-                            learnedFacts = learnedFacts,
-                            longTermConversationDigest = conversationDigest,
-                            onPartialText = onStreamUpdate
-                        )
-                        val (cleaned, executed) = currentOnExecuteAiActions(rawAi)
-                        finalReply = cleaned
-                        appliedActions.addAll(executed)
-                    }
+                    val rawAi = AiAssistantManager.askGeminiAssistant(
+                        prompt = question,
+                        contextSummary = currentFinancialContext,
+                        conversationHistory = historySnapshot,
+                        bitmap = bitmapToSend,
+                        fileContent = fileContentToSend,
+                        fileName = fileNameToSend,
+                        learnedFacts = learnedFacts,
+                        longTermConversationDigest = conversationDigest,
+                        onPartialText = onStreamUpdate
+                    )
+                    val (finalReply, appliedActions) = currentOnExecuteAiActions(rawAi)
 
                     if (streamMessageAdded && botMessageIndex in messages.indices) {
                         messages[botMessageIndex] = ChatMessage(
@@ -14696,37 +15622,11 @@ fun FloatingAiAssistantWidget(
                             )
                         )
                     }
-                    onSaveMessages(messages.toList())
                     if (chatListState.layoutInfo.totalItemsCount > 0) {
-                        chatListState.animateScrollToItem(messages.lastIndex)
+                        chatListState.scrollToItem(messages.lastIndex)
                     }
                     if (isSpeechEnabled) {
                         tts?.speak(finalReply, TextToSpeech.QUEUE_FLUSH, null, null)
-                    }
-
-                    // Background extraction of newly learned facts & long-term conversation digest
-                    coroutineScope.launch(Dispatchers.IO) {
-                        val newFacts = AiAssistantManager.extractLearnedFactsFromTurn(
-                            userMessage = question,
-                            aiReply = finalReply,
-                            existingFacts = learnedFacts
-                        )
-                        if (newFacts.isNotEmpty()) {
-                            withContext(Dispatchers.Main) {
-                                newFacts.forEach { onAddLearnedFact(it) }
-                            }
-                        }
-                        if (messages.size >= 10 && messages.size % 6 == 0) {
-                            val newDigest = AiAssistantManager.synthesizeConversationDigest(
-                                olderMessages = messages.toList(),
-                                currentDigest = conversationDigest
-                            )
-                            if (newDigest.isNotBlank()) {
-                                withContext(Dispatchers.Main) {
-                                    onUpdateDigest(newDigest)
-                                }
-                            }
-                        }
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -14744,7 +15644,6 @@ fun FloatingAiAssistantWidget(
                             )
                         )
                     }
-                    onSaveMessages(messages.toList())
                 } finally {
                     isLoading = false
                 }
@@ -14752,19 +15651,23 @@ fun FloatingAiAssistantWidget(
         }
     }
 
-    BackHandler(enabled = isExpanded) {
+    fun closeAiWindow() {
+        focusManager.clearFocus()
+        keyboardController?.hide()
         isExpanded = false
     }
 
-    var isManualCollapsed by remember { mutableStateOf(false) }
-    val targetHeightFraction = when {
-        isKeyboardOpen -> if (isManualCollapsed) 0.50f else 1.0f
-        isManualCollapsed -> 0.48f
-        else -> 0.82f
+    BackHandler(enabled = isExpanded) {
+        closeAiWindow()
     }
+
+    var isManualCollapsed by remember { mutableStateOf(false) }
+    // Keep top near the header (1.0f of the header-safe container) both when keyboard is up and down,
+    // so when the keyboard is down the top stays fixed near the header and the bottom extends down.
+    val targetHeightFraction = if (isManualCollapsed) 0.50f else 1.0f
     val animatedHeightFraction by animateFloatAsState(
         targetValue = targetHeightFraction,
-        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        animationSpec = tween(durationMillis = 200, easing = FastOutSlowInEasing),
         label = "ai_window_height"
     )
 
@@ -14775,115 +15678,45 @@ fun FloatingAiAssistantWidget(
             expandAnimatable.animateTo(
                 targetValue = 1f,
                 animationSpec = tween(
-                    durationMillis = 440,
-                    easing = CubicBezierEasing(0.12f, 0.95f, 0.25f, 1f)
+                    durationMillis = 200,
+                    easing = FastOutSlowInEasing
                 )
             )
         } else {
             expandAnimatable.animateTo(
                 targetValue = 0f,
                 animationSpec = tween(
-                    durationMillis = 360,
-                    easing = FastOutSlowInEasing
+                    durationMillis = 150,
+                    easing = FastOutLinearInEasing
                 )
             )
         }
     }
 
-    var containerCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
-    var logoBaseCenter by remember { mutableStateOf<Offset?>(null) }
-    var activeTransformOrigin by remember { mutableStateOf(TransformOrigin.Center) }
     val aiPanelShape = remember { RoundedCornerShape(24.dp) }
     val density = LocalDensity.current
 
     val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val headerSafeTop = statusBarTop + 64.dp
 
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            .imePadding()
-            .navigationBarsPadding()
-            .padding(
-                bottom = if (isKeyboardOpen) 4.dp else 12.dp,
-                end = 12.dp,
-                start = 12.dp,
-                top = headerSafeTop
-            )
-            .onGloballyPositioned { containerCoordinates = it }
-    ) {
-        val currentLogoCenter = run {
-            val fallbackCenter = Offset(
-                x = constraints.maxWidth.toFloat() - with(density) { 26.dp.toPx() },
-                y = constraints.maxHeight.toFloat() - with(density) { 86.dp.toPx() }
-            )
-            (logoBaseCenter ?: fallbackCenter) + Offset(offsetX, offsetY)
-        }
-
-        // 1. Expanding energy ripple / aura ring from logo center during launch
-        if (expandAnimatable.value > 0.005f && expandAnimatable.value < 0.96f) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val p = expandAnimatable.value
-                val ringRadius = 26.dp.toPx() + p * 80.dp.toPx()
-                val ringAlpha = ((1f - p) * 0.85f).coerceIn(0f, 1f)
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            BrandCoralPink.copy(alpha = ringAlpha * 0.45f),
-                            BrandMintGreen.copy(alpha = ringAlpha * 0.20f),
-                            Color.Transparent
-                        ),
-                        center = currentLogoCenter,
-                        radius = ringRadius
-                    ),
-                    center = currentLogoCenter,
-                    radius = ringRadius
-                )
-                drawCircle(
-                    color = BrandCoralPink.copy(alpha = ringAlpha * 0.80f),
-                    center = currentLogoCenter,
-                    radius = ringRadius,
-                    style = Stroke(width = 2.5.dp.toPx())
-                )
-            }
-        }
-
-        // 2. Draggable Floating 3D Liquid Glass Orb Chatbot Button
-        if (!isExpanded || expandAnimatable.value < 0.99f) {
-            val isButtonEnabled = !isExpanded && expandAnimatable.value == 0f
+    Box(modifier = Modifier.fillMaxSize()) {
+        // 1. Draggable Floating 3D Liquid Glass Orb Chatbot Button (only rendered when window is fully closed)
+        if (!isExpanded && expandAnimatable.value == 0f) {
             Surface(
                 onClick = {
-                    if (isButtonEnabled) {
-                        val maxW = constraints.maxWidth.toFloat()
-                        val maxH = constraints.maxHeight.toFloat()
-                        val desiredW = with(density) { 420.dp.toPx() }.coerceAtMost(maxW)
-                        val actualW = desiredW.coerceAtLeast(with(density) { 320.dp.toPx() }.coerceAtMost(maxW))
-                        val actualH = maxH * targetHeightFraction
-                        val left = (maxW - actualW) / 2f
-                        val top = maxH - actualH
-                        val pX = if (actualW > 0f) (currentLogoCenter.x - left) / actualW else 0.5f
-                        val pY = if (actualH > 0f) (currentLogoCenter.y - top) / actualH else 1.0f
-                        activeTransformOrigin = TransformOrigin(pX, pY)
-                        isExpanded = true
-                    }
+                    isManualCollapsed = false
+                    isExpanded = true
                 },
-                enabled = isButtonEnabled,
                 shape = CircleShape,
                 color = BrandForestDark.copy(alpha = 0.90f),
                 tonalElevation = 0.dp,
-                shadowElevation = if (expandAnimatable.value < 0.5f) 4.dp else 0.dp,
+                shadowElevation = 0.dp,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(bottom = 60.dp)
+                    .navigationBarsPadding()
+                    .padding(bottom = 72.dp, end = 12.dp)
                     .size(52.dp)
                     .offset { IntOffset(offsetX.roundToInt(), offsetY.roundToInt()) }
-                    .graphicsLayer {
-                        val p = expandAnimatable.value
-                        val s = (1f - p * 1.5f).coerceIn(0f, 1f)
-                        scaleX = s
-                        scaleY = s
-                        alpha = (1f - p * 2.0f).coerceIn(0f, 1f)
-                    }
                     .liquidGlass(
                         shape = CircleShape,
                         tintColor = BrandForestDark,
@@ -14891,22 +15724,11 @@ fun FloatingAiAssistantWidget(
                         accentRimColor = BrandCoralPink,
                         role = LiquidGlassRole.STATIC
                     )
-                    .pointerInput(isExpanded) {
-                        if (!isExpanded) {
-                            detectDragGestures { change, dragAmount ->
-                                change.consume()
-                                offsetX += dragAmount.x
-                                offsetY += dragAmount.y
-                            }
-                        }
-                    }
-                    .onGloballyPositioned { coords ->
-                        if (logoBaseCenter == null) {
-                            val container = containerCoordinates
-                            if (container != null && container.isAttached && coords.isAttached) {
-                                val center = container.localPositionOf(coords, Offset(coords.size.width / 2f, coords.size.height / 2f))
-                                logoBaseCenter = center - Offset(offsetX, offsetY)
-                            }
+                    .pointerInput(Unit) {
+                        detectDragGestures { change, dragAmount ->
+                            change.consume()
+                            offsetX += dragAmount.x
+                            offsetY += dragAmount.y
                         }
                     }
             ) {
@@ -14921,148 +15743,156 @@ fun FloatingAiAssistantWidget(
             }
         }
 
-        // 3. Expanding AI Chatbot Window
+        // 2. Expanding AI Chatbot Window (top anchored near header, bottom extends down when keyboard is down)
         if (isExpanded || expandAnimatable.value > 0.001f) {
             val solidAiBg = Color(0xFF03120C)        // Much darker deep forest green background
             val solidAiSubSurface = Color(0xFF082218) // Rich dark emerald subsurface for bot bubbles & composer
             val solidAiHeaderBg = Color(0xFF020A07)   // Ultra dark forest green header
             val solidAiTextColor = Color.White
 
-            Surface(
-                shape = aiPanelShape,
-                color = solidAiBg,
-                tonalElevation = 0.dp,
-                shadowElevation = 18.dp,
-                border = BorderStroke(1.5.dp, BrandCoralPink.copy(alpha = 0.55f)),
+            Box(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .widthIn(min = 320.dp, max = 420.dp)
-                    .fillMaxWidth()
-                    .fillMaxHeight(animatedHeightFraction)
-                    .graphicsLayer {
-                        transformOrigin = activeTransformOrigin
-                        val p = expandAnimatable.value
-                        scaleX = p
-                        scaleY = p
-                        alpha = (p / 0.12f).coerceIn(0f, 1f)
-                        clip = true
-                        shape = aiPanelShape
-                    }
+                    .fillMaxSize()
+                    .imePadding()
+                    .navigationBarsPadding()
+                    .padding(
+                        bottom = if (isKeyboardOpen) 4.dp else 12.dp,
+                        end = 12.dp,
+                        start = 12.dp,
+                        top = headerSafeTop
+                    )
             ) {
-                Column(
+                Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .background(solidAiBg)
+                        .align(Alignment.BottomCenter)
+                        .widthIn(min = 320.dp, max = 420.dp)
+                        .fillMaxWidth()
+                        .fillMaxHeight(animatedHeightFraction)
+                        .graphicsLayer {
+                            val p = expandAnimatable.value.coerceIn(0f, 1f)
+                            val scale = 0.94f + (0.06f * p)
+                            scaleX = scale
+                            scaleY = scale
+                            translationY = (1f - p) * with(density) { 18.dp.toPx() }
+                            alpha = p
+                            clip = true
+                            shape = aiPanelShape
+                        }
+                        .background(solidAiBg, aiPanelShape)
+                        .border(1.5.dp, BrandCoralPink.copy(alpha = 0.55f), aiPanelShape)
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false)
+                            }
+                        }
                 ) {
-                    // 1. Professional Chatbot Header (Ultra Dark Green)
-                    Row(
+                    Column(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .background(solidAiHeaderBg)
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .fillMaxSize()
+                            .background(solidAiBg)
                     ) {
+                        // 1. Professional Chatbot Header (Ultra Dark Green)
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(solidAiHeaderBg)
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Surface(
-                                shape = CircleShape,
-                                color = BrandCoralPink,
-                                modifier = Modifier.size(34.dp)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Box(contentAlignment = Alignment.Center) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = BrandCoralPink,
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            Icons.Default.AutoAwesome,
+                                            contentDescription = null,
+                                            tint = BrandForestDark,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                                Text(
+                                    "CoinBot",
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                IconButton(
+                                    onClick = { isManualCollapsed = !isManualCollapsed },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
                                     Icon(
-                                        Icons.Default.AutoAwesome,
-                                        contentDescription = null,
-                                        tint = BrandForestDark,
+                                        if (targetHeightFraction > 0.65f) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
+                                        contentDescription = if (targetHeightFraction > 0.65f) "Half Screen" else "Expand to Header",
+                                        tint = SlateGray,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { isSpeechEnabled = !isSpeechEnabled },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Icon(
+                                        if (isSpeechEnabled) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                                        contentDescription = "Toggle Voice Readout",
+                                        tint = if (isSpeechEnabled) BrandMintGreen else SlateGray,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        val currentMsgs = messages.toList()
+                                        coroutineScope.launch(Dispatchers.IO) {
+                                            if (currentMsgs.size > 2) {
+                                                val newDigest = AiAssistantManager.synthesizeConversationDigest(
+                                                    olderMessages = currentMsgs,
+                                                    currentDigest = conversationDigest
+                                                )
+                                                if (newDigest.isNotBlank()) {
+                                                    withContext(Dispatchers.Main) {
+                                                        onUpdateDigest(newDigest)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        messages.clear()
+                                    },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Refresh,
+                                        contentDescription = "Reset Chat",
+                                        tint = SlateGray,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { closeAiWindow() },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Minimize",
+                                        tint = Color.White,
                                         modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
-                            Text(
-                                "CoinBot",
-                                color = Color.White,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.ExtraBold
-                            )
                         }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            IconButton(
-                                onClick = { isManualCollapsed = !isManualCollapsed },
-                                modifier = Modifier.size(30.dp)
-                            ) {
-                                Icon(
-                                    if (targetHeightFraction > 0.65f) Icons.Default.ExpandMore else Icons.Default.ExpandLess,
-                                    contentDescription = if (targetHeightFraction > 0.65f) "Half Screen" else "Expand to Header",
-                                    tint = SlateGray,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            IconButton(
-                                onClick = { isSpeechEnabled = !isSpeechEnabled },
-                                modifier = Modifier.size(30.dp)
-                            ) {
-                                Icon(
-                                    if (isSpeechEnabled) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                                    contentDescription = "Toggle Voice Readout",
-                                    tint = if (isSpeechEnabled) BrandMintGreen else SlateGray,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    val currentMsgs = messages.toList()
-                                    coroutineScope.launch(Dispatchers.IO) {
-                                        if (currentMsgs.size > 2) {
-                                            val newDigest = AiAssistantManager.synthesizeConversationDigest(
-                                                olderMessages = currentMsgs,
-                                                currentDigest = conversationDigest
-                                            )
-                                            if (newDigest.isNotBlank()) {
-                                                withContext(Dispatchers.Main) {
-                                                    onUpdateDigest(newDigest)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    messages.clear()
-                                    messages.add(
-                                        ChatMessage(
-                                            "Chat reset. Hello $currentPersonName! I still remember our prior conversations and everything I've learned about you. How can I assist you today?",
-                                            false
-                                        )
-                                    )
-                                    onSaveMessages(messages.toList())
-                                },
-                                modifier = Modifier.size(30.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Refresh,
-                                    contentDescription = "Reset Chat",
-                                    tint = SlateGray,
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            }
-                            IconButton(
-                                onClick = { isExpanded = false },
-                                modifier = Modifier.size(30.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Close,
-                                    contentDescription = "Minimize",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            }
-                        }
-                    }
 
                     // 2. Quick-Action Suggestion Chips
                     val quickPrompts = listOf(
@@ -15101,6 +15931,50 @@ fun FloatingAiAssistantWidget(
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        if (messages.isEmpty() && !isLoading) {
+                            item {
+                                Box(
+                                    modifier = Modifier
+                                        .fillParentMaxSize()
+                                        .padding(horizontal = 24.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Surface(
+                                            shape = CircleShape,
+                                            color = BrandForestDark,
+                                            border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.5f)),
+                                            modifier = Modifier.size(44.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    Icons.Default.AutoAwesome,
+                                                    contentDescription = null,
+                                                    tint = BrandCoralPink,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
+                                        }
+                                        Text(
+                                            text = "CoinBot is ready",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color.White.copy(alpha = 0.75f)
+                                        )
+                                        Text(
+                                            text = "Ask a question, run a scenario, or share a document/screenshot.",
+                                            fontSize = 11.sp,
+                                            color = SlateGray.copy(alpha = 0.8f),
+                                            lineHeight = 15.sp,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         items(messages) { msg ->
                             val isUser = msg.isFromUser
                             Column(
@@ -15544,6 +16418,7 @@ fun FloatingAiAssistantWidget(
                     }
                 }
             }
+        }
         }
     }
 }

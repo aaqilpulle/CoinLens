@@ -2,16 +2,14 @@ package com.example.expnz20
 
 import android.graphics.Bitmap
 import android.util.Log
+import androidx.core.graphics.scale
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Content
 import com.google.firebase.ai.type.GenerationConfig
-import com.google.firebase.ai.type.ThinkingLevel
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
-import com.google.firebase.ai.type.thinkingConfig
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,12 +18,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-
-data class ImportedShareItem(
-    val ticker: String,
-    val quantity: Double,
-    val averagePrice: Double,
-)
 
 data class LearnedUserFact(
     val id: String = UUID.randomUUID().toString(),
@@ -116,19 +108,34 @@ object AiAssistantManager {
 
     private const val TAG = "AiAssistantManager"
 
-    // Supported active modern models in priority order
+    // Supported active modern Gemini models in priority order
     private val preferredModelCandidates = listOf(
-        "gemini-3.8-flash",
-        "gemini-3.5-flash-lite",
         "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
     )
 
     @Volatile
-    private var activeWorkingModel: String = "gemini-3.8-flash"
+    private var activeWorkingModel: String = "gemini-3.5-flash"
 
     // Cooldown map to avoid retrying models that exhausted their free tier quota (e.g. 429) or do not exist (404)
     private val modelCooldownUntil = ConcurrentHashMap<String, Long>()
-    private val modelsSupportingThinking = ConcurrentHashMap<String, Boolean>()
+
+    // Background warm-up to preemptively trigger Firebase App Check and TLS handshakes,
+    // avoiding the 1-2 minute cold start delay on the user's first actual chat message.
+    suspend fun warmUp() = withContext(Dispatchers.IO) {
+        try {
+            val aiModel = Firebase.ai.generativeModel(
+                modelName = activeWorkingModel,
+                generationConfig = createStandardChatConfig(),
+            )
+            // countTokens is fast, cheap, and forces the network initialization
+            aiModel.countTokens("warm-up")
+            Log.i(TAG, "AI Assistant background warm-up complete.")
+        } catch (e: Exception) {
+            Log.w(TAG, "AI Assistant warm-up failed: ${e.message}")
+        }
+    }
 
     private fun isModelCoolingDown(modelName: String): Boolean {
         val until = modelCooldownUntil[modelName] ?: return false
@@ -140,7 +147,7 @@ object AiAssistantManager {
     }
 
     private fun markModelUnavailable(modelName: String, isPermanent: Boolean = false) {
-        val duration = if (isPermanent) Long.MAX_VALUE else (System.currentTimeMillis() + 6 * 60 * 60 * 1000L)
+        val duration = if (isPermanent) Long.MAX_VALUE else (System.currentTimeMillis() + (6 * 60 * 60 * 1000L))
         modelCooldownUntil[modelName] = duration
         Log.w(TAG, "Model $modelName marked unavailable (permanent=$isPermanent) to preserve responsiveness")
     }
@@ -151,13 +158,12 @@ object AiAssistantManager {
         val msg = e.message?.lowercase() ?: ""
         return msg.contains("quota") || msg.contains("429") || msg.contains("resource_exhausted") ||
                 msg.contains("404") || msg.contains("not found") || msg.contains("retired") ||
-                msg.contains("invalid") || msg.contains("unknown") || msg.contains("does not exist") ||
-                msg.contains("unregistered") || msg.contains("unsupported")
+                msg.contains("does not exist") || msg.contains("unregistered") || msg.contains("unsupported")
     }
 
     private fun getModelCandidates(): List<String> {
         val available = preferredModelCandidates.filter { !isModelCoolingDown(it) }
-        val pool = if (available.isNotEmpty()) available else preferredModelCandidates
+        val pool = available.ifEmpty { listOf(activeWorkingModel) }
         val active = activeWorkingModel
         return if (!isModelCoolingDown(active) && pool.contains(active)) {
             listOf(active) + pool.filter { it != active }
@@ -166,10 +172,10 @@ object AiAssistantManager {
         }
     }
 
-    private fun optimizeBitmapForAi(original: Bitmap, maxDimension: Int = 1024): Bitmap {
+    private fun optimizeBitmapForAi(original: Bitmap, maxDimension: Int = 768): Bitmap {
         val width = original.width
         val height = original.height
-        if (width <= maxDimension && height <= maxDimension) return original
+        if ((width <= maxDimension) && (height <= maxDimension)) return original
 
         val ratio = width.toFloat() / height.toFloat()
         val targetWidth: Int
@@ -181,32 +187,27 @@ object AiAssistantManager {
             targetHeight = maxDimension
             targetWidth = (maxDimension * ratio).toInt().coerceAtLeast(1)
         }
-        return Bitmap.createScaledBitmap(original, targetWidth, targetHeight, true)
+        return original.scale(targetWidth, targetHeight)
     }
 
-    private fun createFastChatConfig(level: ThinkingLevel = ThinkingLevel.MINIMAL): GenerationConfig {
+    private fun createFastChatConfig(): GenerationConfig {
         return generationConfig {
             temperature = 0.2f
-            maxOutputTokens = 900
-            try {
-                thinkingConfig = thinkingConfig {
-                    thinkingLevel = level
-                }
-            } catch (_: Throwable) {}
+            maxOutputTokens = 700
         }
     }
 
     private fun createStandardChatConfig(): GenerationConfig {
         return generationConfig {
             temperature = 0.2f
-            maxOutputTokens = 900
+            maxOutputTokens = 700
         }
     }
 
-    private fun createFastJsonConfig(maxTokens: Int = 500): GenerationConfig {
+    private fun createFastJsonConfig(): GenerationConfig {
         return generationConfig {
             temperature = 0.1f
-            maxOutputTokens = maxTokens
+            maxOutputTokens = 600
             responseMimeType = "application/json"
         }
     }
@@ -231,9 +232,9 @@ object AiAssistantManager {
             .filter { (text, _, _, attachedBitmap, attachedFileName) ->
                 (text.isNotBlank()) || (attachedBitmap != null) || (!attachedFileName.isNullOrBlank())
             }
-            .takeLast(10) // 10 recent turns ensures tight context and instant latency
+            .takeLast(6) // 6 recent turns keeps context tight and minimizes Time-To-First-Token
 
-        val firstUserIdx = recent.indexOfFirst { it.isFromUser }
+        val firstUserIdx = recent.indexOfFirst { (_, isFromUser) -> isFromUser }
         if (firstUserIdx < 0) return emptyList()
         val trimmed = recent.subList(firstUserIdx, recent.size)
 
@@ -242,8 +243,8 @@ object AiAssistantManager {
             val role = if (msg.isFromUser) "user" else "model"
             val formatted = formatHistoryMessageForContext(msg)
             if (coalesced.isNotEmpty() && (coalesced.last().first == role)) {
-                val prev = coalesced.removeAt(coalesced.lastIndex)
-                coalesced.add(role to "${prev.second}\n\n$formatted")
+                val (_, prevText) = coalesced.removeAt(coalesced.lastIndex)
+                coalesced.add(role to "$prevText\n\n$formatted")
             } else {
                 coalesced.add(role to formatted)
             }
@@ -287,7 +288,7 @@ object AiAssistantManager {
                 append("- Property Value & Rent: [[ACTION:SET_PROPERTY_VALUE|property=1|value=850000]], [[ACTION:SET_PROPERTY_RENT|property=1|weeklyRent=650|isRented=true]], [[ACTION:SET_PROPERTY_NAME|property=1|name=12 Smith St]]\n")
                 append("- Property Bills: [[ACTION:ADD_PROPERTY_ITEM|property=1|name=Council Rates|weeklyAmount=-45]], [[ACTION:DELETE_PROPERTY_ITEM|property=1|name=Council Rates]]\n")
                 append("- Mortgage & Offset: [[ACTION:UPDATE_LOAN|property=1|startLoanBalance=450000|originalLoanAmount=500000|interestRatePa=6.15|offsetBalance=55000]]\n")
-                append("- Shares / ETFs: [[ACTION:ADD_SHARE|code=VAS|owner=Me|units=50|purchasePrice=95.0|currentPrice=108.57]], [[ACTION:UPDATE_SHARE|code=VAS|units=60|purchasePrice=96.0|currentPrice=108.57]], [[ACTION:DELETE_SHARE|code=VAS]]\n")
+                append("- Shares / ETFs / Stock Portfolio Screenshots: [[ACTION:ADD_SHARE|code=VAS|owner=Me|units=50|purchasePrice=95.0|currentPrice=108.57]], [[ACTION:UPDATE_SHARE|code=VAS|units=60|purchasePrice=96.0|currentPrice=108.57]], [[ACTION:DELETE_SHARE|code=VAS]]. If the user provides a portfolio screenshot, brokerage statement, or trade confirmation image, inspect every holding shown and emit [[ACTION:ADD_SHARE|code=...|owner=Me|units=...|purchasePrice=...|currentPrice=...]] for each share holding.\n")
                 append("- Superannuation: [[ACTION:ADD_SUPER|fundName=AustralianSuper|owner=Me|balance=125000]], [[ACTION:UPDATE_SUPER|fundName=AustralianSuper|balance=130000]], [[ACTION:DELETE_SUPER|fundName=AustralianSuper]]\n")
                 append("- Other Assets: [[ACTION:ADD_OTHER_ASSET|name=Car|owner=Me|value=25000]], [[ACTION:UPDATE_OTHER_ASSET|name=Car|value=28000]], [[ACTION:DELETE_OTHER_ASSET|name=Car]]\n")
                 append("- Levers: [[ACTION:SET_WHAT_IF_LEVERS|horizonYears=15|extraSavingsWeekly=200|incomeGrowth1Weekly=100|incomeGrowth2Weekly=0|rateShockProp1=-0.5|rateShockProp2=-0.5|superBoostWeekly=100|rentalGrowthWeekly=50]], [[ACTION:RESET_LEVERS]]\n")
@@ -295,28 +296,25 @@ object AiAssistantManager {
                 append("- Profile: [[ACTION:UPDATE_PROFILE|person1Name=Alex|person2Name=Sam|isCoupleMode=true]]\n")
                 append("- Remember Fact: [[ACTION:REMEMBER_FACT|category=Goals|fact=Targeting $100k ETF portfolio by 2027]] (categories: Goals, History, Preferences, Personal, Financial, Milestones)\n")
                 append("- Forget Fact: [[ACTION:FORGET_FACT|query=Targeting $100k]]\n\n")
-                append("RULES: 1 yr = 52 wks. Monthly = weekly * 52 / 12. Direct, sharp, warm Australian financial expertise. No markdown asterisks or hashes.\n\n")
+                append("RULES: 1 yr = 52 wks. Monthly = weekly * 52 / 12. Be concise, direct, sharp, and warm. No markdown asterisks or hashes.\n\n")
 
                 if (learnedFacts.isNotEmpty() || userProfileSummary.isNotBlank() || longTermConversationDigest.isNotBlank()) {
-                    append("====================================================================\n")
-                    append("PERMANENT USER MEMORY (AUTOMATICALLY LEARNED ACROSS ALL CONVERSATIONS):\n")
+                    append("PERMANENT USER MEMORY:\n")
                     if (learnedFacts.isNotEmpty()) {
-                        val grouped = learnedFacts.takeLast(20).groupBy { it.category }
+                        val grouped = learnedFacts.takeLast(15).groupBy { (_, category) -> category }
                         for ((cat, facts) in grouped) {
-                            append("• [$cat]:\n")
-                            facts.forEach { f -> append("   - ${f.fact}\n") }
+                            append("[$cat]: ${facts.joinToString("; ") { (_, _, fact) -> fact }}\n")
                         }
                     }
-                    if (userProfileSummary.isNotBlank()) append("USER SUMMARY:\n$userProfileSummary\n")
-                    if (longTermConversationDigest.isNotBlank()) append("CONVERSATION DIGEST:\n$longTermConversationDigest\n")
-                    append("====================================================================\n\n")
+                    if (userProfileSummary.isNotBlank()) append("USER SUMMARY: $userProfileSummary\n")
+                    if (longTermConversationDigest.isNotBlank()) append("DIGEST: $longTermConversationDigest\n")
+                    append("\n")
                 }
 
-                append("AUTOMATIC CONTINUOUS LEARNING:\n")
-                append("Whenever the user shares any new fact about themselves (goals, career, family, preferences, history), remember it automatically and emit [[ACTION:REMEMBER_FACT|category=...|fact=...]] at the very end.\n\n")
+                append("Whenever the user shares a new personal or financial fact/goal, emit [[ACTION:REMEMBER_FACT|category=...|fact=...]] at the very end.\n\n")
 
                 if (contextSummary.isNotBlank()) {
-                    append("REAL-TIME APP FINANCIAL DATA:\n$contextSummary\n\n")
+                    append("REAL-TIME APP FINANCIAL DATA:\n$contextSummary\n")
                 }
             }
 
@@ -325,7 +323,9 @@ object AiAssistantManager {
             val userTurnPrompt = buildString {
                 if (historyContents.isEmpty() && conversationHistory.isNotEmpty()) {
                     val relevantTurns = conversationHistory
-                        .filter { (it.text.isNotBlank()) || (it.attachedBitmap != null) || (!it.attachedFileName.isNullOrBlank()) }
+                        .filter { (text, _, _, attachedBitmap, attachedFileName) ->
+                            (text.isNotBlank()) || (attachedBitmap != null) || (!attachedFileName.isNullOrBlank())
+                        }
                         .takeLast(4)
                     if (relevantTurns.isNotEmpty()) {
                         append("RECENT CONVERSATION CONTEXT:\n")
@@ -337,10 +337,10 @@ object AiAssistantManager {
                     }
                 }
                 if (!fileName.isNullOrBlank() && !fileContent.isNullOrBlank()) {
-                    append("ATTACHED FILE ($fileName):\n${fileContent.take(12000)}\n\n")
+                    append("ATTACHED FILE ($fileName):\n${fileContent.take(10000)}\n\n")
                 }
                 append("CURRENT USER MESSAGE:\n$prompt\n\n")
-                append("[DIRECTIVE: If confirming or applying changes/facts, emit the exact [[ACTION:ACTION_TYPE|...]] tag at the very end.]")
+                append("[DIRECTIVE: Keep response concise and fast. If confirming or applying changes/facts, emit the exact [[ACTION:ACTION_TYPE|...]] tag at the very end.]")
             }
 
             val optimizedBitmap = bitmap?.let { optimizeBitmapForAi(it) }
@@ -349,61 +349,15 @@ object AiAssistantManager {
                 text(userTurnPrompt)
             }
             val inputList = if (historyContents.isNotEmpty()) historyContents + currentTurnContent else listOf(currentTurnContent)
-            val combinedFallbackPrompt = "$systemInstructionText\n\n$userTurnPrompt"
+            val systemInstructionContent = content { text(systemInstructionText) }
 
             var lastError: Exception? = null
             for (modelName in getModelCandidates()) {
-                val canTryThinking = modelsSupportingThinking[modelName] != false
-
-                // Attempt 1: Ultra-fast streaming with minimal thinking (if supported)
-                if (canTryThinking) {
-                    try {
-                        val aiModel = Firebase.ai.generativeModel(
-                            modelName = modelName,
-                            generationConfig = createFastChatConfig(ThinkingLevel.MINIMAL),
-                            systemInstruction = content { text(systemInstructionText) },
-                        )
-                        val buffer = StringBuilder()
-                        if (onPartialText != null) {
-                            aiModel.generateContentStream(inputList).collect { chunk ->
-                                val text = chunk.text
-                                if (!text.isNullOrEmpty()) {
-                                    buffer.append(text)
-                                    onPartialText.invoke(buffer.toString())
-                                }
-                            }
-                        } else {
-                            val response = aiModel.generateContent(inputList)
-                            buffer.append(response.text ?: "")
-                        }
-                        val rawText = buffer.toString()
-                        if (rawText.isNotBlank()) {
-                            activeWorkingModel = modelName
-                            modelsSupportingThinking[modelName] = true
-                            return@withContext cleanMarkdownText(rawText)
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Model $modelName minimal thinking failed: ${e.message}")
-                        lastError = e
-                        val msg = e.message?.lowercase() ?: ""
-                        val isThinkingIssue = msg.contains("thinking") || msg.contains("generationconfig")
-                        if (isThinkingIssue) {
-                            modelsSupportingThinking[modelName] = false
-                            // Fall through to Attempt 2 for this model without thinkingConfig
-                        } else {
-                            val isPermanent = msg.contains("404") || msg.contains("not found") || msg.contains("invalid") || msg.contains("retired")
-                            markModelUnavailable(modelName, isPermanent = isPermanent)
-                            continue // Move immediately to next candidate!
-                        }
-                    }
-                }
-
-                // Attempt 2: Standard fast configuration (bounded tokens, low temperature, no thinkingConfig)
                 try {
                     val aiModel = Firebase.ai.generativeModel(
                         modelName = modelName,
                         generationConfig = createStandardChatConfig(),
-                        systemInstruction = content { text(systemInstructionText) },
+                        systemInstruction = systemInstructionContent,
                     )
                     val buffer = StringBuilder()
                     if (onPartialText != null) {
@@ -427,7 +381,7 @@ object AiAssistantManager {
                     Log.w(TAG, "Model $modelName standard chat config failed: ${e.message}")
                     lastError = e
                     val msg = e.message?.lowercase() ?: ""
-                    val isPermanent = msg.contains("404") || msg.contains("not found") || msg.contains("invalid") || msg.contains("retired")
+                    val isPermanent = msg.contains("404") || msg.contains("not found") || msg.contains("retired")
                     markModelUnavailable(modelName, isPermanent = isPermanent)
                     continue
                 }
@@ -440,79 +394,15 @@ object AiAssistantManager {
         }
     }
 
-    // Continuously learn and extract facts about the user and user history from conversation turns
-    suspend fun extractLearnedFactsFromTurn(
-        userMessage: String,
-        aiReply: String,
-        existingFacts: List<LearnedUserFact>,
-    ): List<LearnedUserFact> = withContext(Dispatchers.IO) {
-        if (userMessage.trim().length < 4) return@withContext emptyList()
-        val existingSummary = existingFacts.takeLast(15).joinToString("; ") { "[${it.category}] ${it.fact}" }
-        val prompt = """
-            Analyze this conversation turn between an Australian user and CoinBot (wealth advisor).
-            User said: "$userMessage"
-            CoinBot replied: "$aiReply"
-            Known facts already remembered: "$existingSummary"
-
-            Extract any NEW facts or details revealed about the user themselves:
-            - Their career, occupation, job changes, income history, or earnings
-            - Their family, relationship status, children, partner, living situation
-            - Their financial goals (property purchase, investing targets, retirement, savings, travel, wedding)
-            - Their past financial history, past decisions, milestones, life events
-            - Their financial habits, risk appetite, preferred investments (e.g. ETFs, offset)
-
-            Rules:
-            - Only extract facts stated or confirmed by the USER, not bot speculations or generic advice.
-            - Do not duplicate facts already in 'Known facts'.
-            - Return ONLY a valid JSON array of objects with keys:
-              "category": string (one of "Goals", "History", "Preferences", "Personal", "Financial", "Milestones")
-              "fact": string (concise, factual summary)
-            - If no new user facts were revealed, return []
-            No markdown, no backticks, just raw JSON array.
-        """.trimIndent()
-
-        val candidates = getModelCandidates()
-        for (modelName in candidates) {
-            try {
-                val aiModel = Firebase.ai.generativeModel(
-                    modelName = modelName,
-                    generationConfig = createFastJsonConfig(350),
-                )
-                val response = aiModel.generateContent(prompt)
-                val raw = response.text ?: continue
-                val clean = raw.replace("```json", "").replace("```", "").trim()
-                if (clean.isBlank() || clean == "[]") return@withContext emptyList()
-                val arr = JSONArray(clean)
-                val extracted = mutableListOf<LearnedUserFact>()
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val cat = o.optString("category", "General").trim()
-                    val fact = o.optString("fact", "").trim()
-                    if (fact.isNotBlank()) {
-                        extracted.add(LearnedUserFact(category = cat, fact = fact))
-                    }
-                }
-                activeWorkingModel = modelName
-                return@withContext extracted
-            } catch (e: Exception) {
-                Log.w(TAG, "extractLearnedFacts failed on $modelName: ${e.message}")
-                if (isQuotaOrNotFoundError(e)) {
-                    markModelQuotaExceeded(modelName)
-                }
-            }
-        }
-        return@withContext emptyList()
-    }
-
     // Synthesize dense long-term conversation digest across older conversation turns
     suspend fun synthesizeConversationDigest(
         olderMessages: List<ChatMessage>,
         currentDigest: String,
     ): String = withContext(Dispatchers.IO) {
         if (olderMessages.isEmpty()) return@withContext currentDigest
-        val transcript = olderMessages.takeLast(10).joinToString("\n") { msg ->
-            val role = if (msg.isFromUser) "User" else "CoinBot"
-            "$role: ${msg.text.take(180)}"
+        val transcript = olderMessages.takeLast(10).joinToString("\n") { (text, isFromUser) ->
+            val role = if (isFromUser) "User" else "CoinBot"
+            "$role: ${text.take(180)}"
         }
         val prompt = """
             You are the memory engine for CoinBot, an Australian wealth advisor.
@@ -536,7 +426,7 @@ object AiAssistantManager {
             try {
                 val aiModel = Firebase.ai.generativeModel(
                     modelName = modelName,
-                    generationConfig = createStandardChatConfig(),
+                    generationConfig = createFastChatConfig(),
                 )
                 val resp = aiModel.generateContent(prompt)
                 val text = resp.text
@@ -573,7 +463,7 @@ object AiAssistantManager {
             try {
                 val aiModel = Firebase.ai.generativeModel(
                     modelName = modelName,
-                    generationConfig = createFastJsonConfig(600),
+                    generationConfig = createFastJsonConfig(),
                 )
                 val response = aiModel.generateContent(prompt)
                 val rawText = response.text ?: continue
@@ -596,64 +486,6 @@ object AiAssistantManager {
                 return@withContext results
             } catch (e: Exception) {
                 Log.w(TAG, "detectSubscriptionLeaks failed on $modelName: ${e.message}")
-                if (isQuotaOrNotFoundError(e)) {
-                    markModelQuotaExceeded(modelName)
-                }
-            }
-        }
-        return@withContext emptyList()
-    }
-
-    // Parse Portfolio Screenshots using Firebase AI
-    suspend fun parsePearlerScreenshotWithAi(bitmap: Bitmap): List<ImportedShareItem> = withContext(Dispatchers.IO) {
-        val prompt = """
-            Analyze this screenshot of an investment/shares portfolio containing multiple shares.
-            Extract every individual stock holding visible in the image.
-            Return ONLY a valid JSON array of objects with these exact keys:
-            - "ticker": string (e.g., "VAS", "VDHG", "AAPL")
-            - "quantity": number (total units or shares held)
-            - "averagePrice": number (price shown, or 0.0 if not available)
-            No markdown formatting, no backticks, just the raw JSON array. If this is not a shares portfolio screenshot, return [].
-        """.trimIndent()
-
-        val optimized = optimizeBitmapForAi(bitmap)
-        val inputContent = content {
-            image(optimized)
-            text(prompt)
-        }
-
-        val candidates = getModelCandidates()
-        for (modelName in candidates) {
-            try {
-                val aiModel = Firebase.ai.generativeModel(
-                    modelName = modelName,
-                    generationConfig = createFastJsonConfig(700),
-                )
-                val response = aiModel.generateContent(inputContent)
-                val rawText = response.text ?: continue
-
-                val cleanJsonStr = rawText.replace("```json", "").replace("```", "").trim()
-                val jsonArray = JSONArray(cleanJsonStr)
-                val results = mutableListOf<ImportedShareItem>()
-
-                for (i in 0 until jsonArray.length()) {
-                    val obj = jsonArray.getJSONObject(i)
-                    val ticker = obj.optString("ticker", "").trim()
-                    val qty = obj.optDouble("quantity", 0.0)
-                    if (ticker.isNotBlank() && qty > 0.0) {
-                        results.add(
-                            ImportedShareItem(
-                                ticker = ticker,
-                                quantity = qty,
-                                averagePrice = obj.optDouble("averagePrice", 0.0),
-                            ),
-                        )
-                    }
-                }
-                activeWorkingModel = modelName
-                return@withContext results
-            } catch (e: Exception) {
-                Log.w(TAG, "parsePearlerScreenshotWithAi failed on $modelName: ${e.message}")
                 if (isQuotaOrNotFoundError(e)) {
                     markModelQuotaExceeded(modelName)
                 }
