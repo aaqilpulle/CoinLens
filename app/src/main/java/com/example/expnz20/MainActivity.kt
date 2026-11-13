@@ -42,6 +42,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
@@ -59,6 +61,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -71,6 +74,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -116,6 +120,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawOutline
@@ -124,9 +129,13 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.graphics.TransformOrigin
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
 
@@ -174,7 +183,7 @@ val LocalIsDarkTheme = staticCompositionLocalOf { true }
 // ============================================================================
 @Composable
 fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
-    val baseBg = if (isDarkMode) BrandForestDark else Color(0xFF0A221A)
+    val baseBg = if (isDarkMode) BrandForestDark else LightModeAppBackground
 
     Spacer(
         modifier = Modifier
@@ -188,7 +197,7 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
                 val c1 = Offset(w * 0.20f, h * 0.16f)
                 val brush1 = Brush.radialGradient(
                     colors = listOf(
-                        BrandCoralPink.copy(alpha = if (isDarkMode) 0.12f else 0.08f),
+                        BrandCoralPink.copy(alpha = if (isDarkMode) 0.12f else 0.045f),
                         BrandCoralPink.copy(alpha = if (isDarkMode) 0.03f else 0.01f),
                         Color.Transparent
                     ),
@@ -199,7 +208,7 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
                 val c2 = Offset(w * 0.82f, h * 0.44f)
                 val brush2 = Brush.radialGradient(
                     colors = listOf(
-                        BrandMintGreen.copy(alpha = if (isDarkMode) 0.11f else 0.08f),
+                        BrandMintGreen.copy(alpha = if (isDarkMode) 0.11f else 0.035f),
                         BrandSkyBlue.copy(alpha = if (isDarkMode) 0.03f else 0.01f),
                         Color.Transparent
                     ),
@@ -210,8 +219,8 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
                 val c3 = Offset(w * 0.26f, h * 0.82f)
                 val brush3 = Brush.radialGradient(
                     colors = listOf(
-                        BrandSkyBlue.copy(alpha = if (isDarkMode) 0.09f else 0.07f),
-                        BrandPurple.copy(alpha = if (isDarkMode) 0.04f else 0.02f),
+                        BrandSkyBlue.copy(alpha = if (isDarkMode) 0.09f else 0.04f),
+                        BrandPurple.copy(alpha = if (isDarkMode) 0.04f else 0.015f),
                         Color.Transparent
                     ),
                     center = c3,
@@ -221,7 +230,7 @@ fun LiquidGlassAmbientBackground(isDarkMode: Boolean) {
                 val c4 = Offset(w * 0.76f, h * 0.86f)
                 val brush4 = Brush.radialGradient(
                     colors = listOf(
-                        BrandWarmAmber.copy(alpha = if (isDarkMode) 0.08f else 0.06f),
+                        BrandWarmAmber.copy(alpha = if (isDarkMode) 0.08f else 0.035f),
                         Color.Transparent
                     ),
                     center = c4,
@@ -245,42 +254,61 @@ enum class LiquidGlassRole {
     STATIC
 }
 
+@Immutable
+data class OrbBoundarySpan(
+    val leftPx: Float,
+    val rightPx: Float,
+    val intensity: Float
+)
+
 @Stable
 class LiquidScrollBoundaryState {
+    var hostViewIdentity by mutableIntStateOf(0)
+
     var headerTopPx by mutableFloatStateOf(0f)
     var headerBottomPx by mutableFloatStateOf(0f)
     var headerLeftPx by mutableFloatStateOf(0f)
+    var headerRightPx by mutableFloatStateOf(0f)
     var headerWidthPx by mutableFloatStateOf(0f)
 
     var footerTopPx by mutableFloatStateOf(Float.MAX_VALUE)
     var footerBottomPx by mutableFloatStateOf(Float.MAX_VALUE)
     var footerLeftPx by mutableFloatStateOf(0f)
+    var footerRightPx by mutableFloatStateOf(0f)
     var footerWidthPx by mutableFloatStateOf(0f)
 
-    private val headerContacts = mutableStateMapOf<Int, Pair<Float, Float>>()
-    private val footerContacts = mutableStateMapOf<Int, Pair<Float, Float>>()
+    val headerContacts = mutableStateMapOf<Int, OrbBoundarySpan>()
+    val footerContacts = mutableStateMapOf<Int, OrbBoundarySpan>()
 
-    val headerTouchIntensity: Float
-        get() = headerContacts.values.maxOfOrNull { it.first } ?: 0f
-
-    val headerTouchCenterX: Float
-        get() = headerContacts.values.maxByOrNull { it.first }?.second ?: 0f
-
-    val footerTouchIntensity: Float
-        get() = footerContacts.values.maxOfOrNull { it.first } ?: 0f
-
-    val footerTouchCenterX: Float
-        get() = footerContacts.values.maxByOrNull { it.first }?.second ?: 0f
-
-    fun updateContact(id: Int, topIntensity: Float, bottomIntensity: Float, centerX: Float) {
+    fun updateContact(
+        id: Int,
+        topIntensity: Float,
+        bottomIntensity: Float,
+        leftPx: Float,
+        rightPx: Float
+    ) {
         if (topIntensity > 0.015f) {
-            headerContacts[id] = topIntensity to centerX
-        } else {
+            val prev = headerContacts[id]
+            if (prev == null ||
+                abs(prev.intensity - topIntensity) > 0.02f ||
+                abs(prev.leftPx - leftPx) > 3f ||
+                abs(prev.rightPx - rightPx) > 3f
+            ) {
+                headerContacts[id] = OrbBoundarySpan(leftPx, rightPx, topIntensity)
+            }
+        } else if (headerContacts.containsKey(id)) {
             headerContacts.remove(id)
         }
         if (bottomIntensity > 0.015f) {
-            footerContacts[id] = bottomIntensity to centerX
-        } else {
+            val prev = footerContacts[id]
+            if (prev == null ||
+                abs(prev.intensity - bottomIntensity) > 0.02f ||
+                abs(prev.leftPx - leftPx) > 3f ||
+                abs(prev.rightPx - rightPx) > 3f
+            ) {
+                footerContacts[id] = OrbBoundarySpan(leftPx, rightPx, bottomIntensity)
+            }
+        } else if (footerContacts.containsKey(id)) {
             footerContacts.remove(id)
         }
     }
@@ -289,6 +317,47 @@ class LiquidScrollBoundaryState {
         headerContacts.remove(id)
         footerContacts.remove(id)
     }
+}
+
+private object LiquidOrbIdGenerator {
+    private val counter = AtomicInteger(1)
+    fun nextId(): Int = counter.getAndIncrement()
+}
+
+@Stable
+private class OrbLiquidContactState {
+    // Smooth surface-tension impulse [-1..1]: positive = kiss/pull toward bar at contact
+    var topPull by mutableFloatStateOf(0f)
+    var bottomPull by mutableFloatStateOf(0f)
+
+    // Pre-contact / trailing capillary meniscus gap [0..bridgeRangePx] & progress [0..1]
+    var topBridgeStrength by mutableFloatStateOf(0f)
+    var topBridgeGapPx by mutableFloatStateOf(0f)
+    var topBridgeFromBottomEdge by mutableStateOf(false)
+
+    var bottomBridgeStrength by mutableFloatStateOf(0f)
+    var bottomBridgeGapPx by mutableFloatStateOf(0f)
+    var bottomBridgeFromTopEdge by mutableStateOf(false)
+
+    // Local X span intersecting the bar [0..width] & corner fillet visibility while passing under
+    var headerLocalLeftPx by mutableFloatStateOf(0f)
+    var headerLocalRightPx by mutableFloatStateOf(0f)
+    var headerSeamYPx by mutableFloatStateOf(0f)
+    var headerSeamStrength by mutableFloatStateOf(0f)
+    var headerCanFilletLeft by mutableStateOf(false)
+    var headerCanFilletRight by mutableStateOf(false)
+
+    var footerLocalLeftPx by mutableFloatStateOf(0f)
+    var footerLocalRightPx by mutableFloatStateOf(0f)
+    var footerSeamYPx by mutableFloatStateOf(0f)
+    var footerSeamStrength by mutableFloatStateOf(0f)
+    var footerCanFilletLeft by mutableStateOf(false)
+    var footerCanFilletRight by mutableStateOf(false)
+}
+
+private fun smoothstep01(t: Float): Float {
+    val c = t.coerceIn(0f, 1f)
+    return c * c * (3f - 2f * c)
 }
 
 @Stable
@@ -304,6 +373,7 @@ class OrbRevealState {
 
 val LocalOrbRevealState = staticCompositionLocalOf { OrbRevealState() }
 val LocalLiquidScrollBoundary = staticCompositionLocalOf { LiquidScrollBoundaryState() }
+val LocalInsideOrbCard = staticCompositionLocalOf { false }
 val LocalOnHorizontalChildTouchChange = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
 
 @Composable
@@ -327,6 +397,7 @@ fun Modifier.lockPagerOnTouch(): Modifier {
     }
 }
 
+@Composable
 fun Modifier.liquidGlass(
     shape: Shape = RoundedCornerShape(22.dp),
     tintColor: Color = BrandForestSurface,
@@ -334,10 +405,200 @@ fun Modifier.liquidGlass(
     accentRimColor: Color = BrandCoralPink,
     role: LiquidGlassRole = LiquidGlassRole.ORB
 ): Modifier {
+    val boundary = LocalLiquidScrollBoundary.current
+    val currentViewId = System.identityHashCode(LocalView.current)
+    val isDark = LocalIsDarkTheme.current
+    val density = LocalDensity.current
     val shouldClip = role == LiquidGlassRole.HEADER || role == LiquidGlassRole.FOOTER
-    val baseModifier = if (shouldClip) this.clip(shape) else this
 
-    return baseModifier.drawWithCache {
+    val orbId = remember(role) { if (role == LiquidGlassRole.ORB) LiquidOrbIdGenerator.nextId() else 0 }
+    val orbLocalState = remember(role) { if (role == LiquidGlassRole.ORB) OrbLiquidContactState() else null }
+
+    if (role == LiquidGlassRole.ORB) {
+        DisposableEffect(boundary, orbId) {
+            onDispose { boundary.removeContact(orbId) }
+        }
+    }
+
+    var trackedModifier: Modifier = if (shouldClip) this.clip(shape) else this
+
+    when (role) {
+        LiquidGlassRole.HEADER -> {
+            trackedModifier = trackedModifier.onGloballyPositioned { coords ->
+                if (!coords.isAttached) return@onGloballyPositioned
+                val b = coords.boundsInRoot()
+                boundary.headerTopPx = b.top
+                boundary.headerBottomPx = b.bottom
+                boundary.headerLeftPx = b.left
+                boundary.headerRightPx = b.right
+                boundary.headerWidthPx = b.width
+            }
+        }
+        LiquidGlassRole.FOOTER -> {
+            trackedModifier = trackedModifier.onGloballyPositioned { coords ->
+                if (!coords.isAttached) return@onGloballyPositioned
+                val b = coords.boundsInRoot()
+                boundary.footerTopPx = b.top
+                boundary.footerBottomPx = b.bottom
+                boundary.footerLeftPx = b.left
+                boundary.footerRightPx = b.right
+                boundary.footerWidthPx = b.width
+            }
+        }
+        LiquidGlassRole.ORB -> {
+            val localState = orbLocalState!!
+            val contactZonePx = with(density) { 6.5.dp.toPx() }
+            val bridgeRangePx = with(density) { 5.5.dp.toPx() }
+            val filletMarginPx = with(density) { 8.dp.toPx() }
+            val seamFadePx = with(density) { 7.dp.toPx() }
+            val maxPullShiftPx = with(density) { 1.15.dp.toPx() }
+
+            trackedModifier = trackedModifier
+                .onGloballyPositioned { coords ->
+                    if (!coords.isAttached || boundary.hostViewIdentity == 0 || currentViewId != boundary.hostViewIdentity) {
+                        localState.topPull = 0f
+                        localState.bottomPull = 0f
+                        localState.topBridgeStrength = 0f
+                        localState.bottomBridgeStrength = 0f
+                        localState.headerSeamStrength = 0f
+                        localState.footerSeamStrength = 0f
+                        boundary.removeContact(orbId)
+                        return@onGloballyPositioned
+                    }
+                    val b = coords.boundsInRoot()
+                    val headerBottom = boundary.headerBottomPx
+                    val overlapHeaderLeft = max(b.left, boundary.headerLeftPx)
+                    val overlapHeaderRight = min(b.right, boundary.headerRightPx)
+                    val overlapsHeaderX = headerBottom > 0f && overlapHeaderRight - overlapHeaderLeft > 24f
+
+                    if (overlapsHeaderX) {
+                        val gapTop = b.top - headerBottom
+                        val gapBottom = b.bottom - headerBottom
+                        val kissTop = smoothstep01(1f - abs(gapTop) / contactZonePx)
+                        val pinchTop = smoothstep01(1f - abs(gapBottom) / contactZonePx) * 0.75f
+                        localState.topPull = max(kissTop, pinchTop)
+
+                        localState.headerLocalLeftPx = (overlapHeaderLeft - b.left).coerceIn(0f, b.width)
+                        localState.headerLocalRightPx = (overlapHeaderRight - b.left).coerceIn(0f, b.width)
+
+                        when {
+                            gapTop > 0f && gapTop < bridgeRangePx -> {
+                                localState.topBridgeStrength = smoothstep01(1f - gapTop / bridgeRangePx)
+                                localState.topBridgeGapPx = gapTop
+                                localState.topBridgeFromBottomEdge = false
+                            }
+                            gapBottom > 0f && gapBottom < bridgeRangePx -> {
+                                localState.topBridgeStrength = smoothstep01(1f - gapBottom / bridgeRangePx) * 0.85f
+                                localState.topBridgeGapPx = gapBottom
+                                localState.topBridgeFromBottomEdge = true
+                            }
+                            else -> {
+                                localState.topBridgeStrength = 0f
+                                localState.topBridgeGapPx = 0f
+                            }
+                        }
+
+                        if (b.top < headerBottom && b.bottom > headerBottom) {
+                            val seamY = headerBottom - b.top
+                            val edgeDist = min(seamY, b.height - seamY)
+                            localState.headerSeamYPx = seamY
+                            localState.headerSeamStrength = smoothstep01(edgeDist / seamFadePx)
+                            localState.headerCanFilletLeft = b.left > boundary.headerLeftPx + filletMarginPx
+                            localState.headerCanFilletRight = b.right < boundary.headerRightPx - filletMarginPx
+                        } else {
+                            localState.headerSeamStrength = 0f
+                        }
+                    } else {
+                        localState.topPull = 0f
+                        localState.topBridgeStrength = 0f
+                        localState.headerSeamStrength = 0f
+                    }
+
+                    val footerTop = boundary.footerTopPx
+                    val overlapFooterLeft = max(b.left, boundary.footerLeftPx)
+                    val overlapFooterRight = min(b.right, boundary.footerRightPx)
+                    val overlapsFooterX = footerTop < Float.MAX_VALUE * 0.5f && overlapFooterRight - overlapFooterLeft > 24f
+
+                    if (overlapsFooterX) {
+                        val gapBottom = footerTop - b.bottom
+                        val gapTop = footerTop - b.top
+                        val kissBottom = smoothstep01(1f - abs(gapBottom) / contactZonePx)
+                        val pinchBottom = smoothstep01(1f - abs(gapTop) / contactZonePx) * 0.75f
+                        localState.bottomPull = max(kissBottom, pinchBottom)
+
+                        localState.footerLocalLeftPx = (overlapFooterLeft - b.left).coerceIn(0f, b.width)
+                        localState.footerLocalRightPx = (overlapFooterRight - b.left).coerceIn(0f, b.width)
+
+                        when {
+                            gapBottom > 0f && gapBottom < bridgeRangePx -> {
+                                localState.bottomBridgeStrength = smoothstep01(1f - gapBottom / bridgeRangePx)
+                                localState.bottomBridgeGapPx = gapBottom
+                                localState.bottomBridgeFromTopEdge = false
+                            }
+                            gapTop > 0f && gapTop < bridgeRangePx -> {
+                                localState.bottomBridgeStrength = smoothstep01(1f - gapTop / bridgeRangePx) * 0.85f
+                                localState.bottomBridgeGapPx = gapTop
+                                localState.bottomBridgeFromTopEdge = true
+                            }
+                            else -> {
+                                localState.bottomBridgeStrength = 0f
+                                localState.bottomBridgeGapPx = 0f
+                            }
+                        }
+
+                        if (b.top < footerTop && b.bottom > footerTop) {
+                            val seamY = footerTop - b.top
+                            val edgeDist = min(seamY, b.height - seamY)
+                            localState.footerSeamYPx = seamY
+                            localState.footerSeamStrength = smoothstep01(edgeDist / seamFadePx)
+                            localState.footerCanFilletLeft = b.left > boundary.footerLeftPx + filletMarginPx
+                            localState.footerCanFilletRight = b.right < boundary.footerRightPx - filletMarginPx
+                        } else {
+                            localState.footerSeamStrength = 0f
+                        }
+                    } else {
+                        localState.bottomPull = 0f
+                        localState.bottomBridgeStrength = 0f
+                        localState.footerSeamStrength = 0f
+                    }
+
+                    val headerContactStrength = if (overlapsHeaderX) {
+                        max(localState.topPull, localState.headerSeamStrength * 0.85f)
+                    } else 0f
+                    val footerContactStrength = if (overlapsFooterX) {
+                        max(localState.bottomPull, localState.footerSeamStrength * 0.85f)
+                    } else 0f
+
+                    val contactLeft = if (overlapsHeaderX) overlapHeaderLeft else overlapFooterLeft
+                    val contactRight = if (overlapsHeaderX) overlapHeaderRight else overlapFooterRight
+                    boundary.updateContact(
+                        id = orbId,
+                        topIntensity = headerContactStrength,
+                        bottomIntensity = footerContactStrength,
+                        leftPx = contactLeft,
+                        rightPx = contactRight
+                    )
+                }
+                .graphicsLayer {
+                    val pullTop = localState.topPull
+                    val pullBottom = localState.bottomPull
+                    val pull = max(pullTop, pullBottom)
+                    if (pull > 0.005f) {
+                        scaleY = 1f + 0.0055f * pull
+                        scaleX = 1f - 0.0025f * pull
+                        translationY = (pullBottom - pullTop) * maxPullShiftPx
+                        transformOrigin = if (pullTop >= pullBottom) {
+                            TransformOrigin(0.5f, 0f)
+                        } else {
+                            TransformOrigin(0.5f, 1f)
+                        }
+                    }
+                }
+        }
+        LiquidGlassRole.STATIC -> Unit
+    }
+
+    return trackedModifier.drawWithCache {
         val outline = shape.createOutline(size, layoutDirection, this)
         val safeIntensity = intensity.coerceIn(0.65f, 1.5f)
         val strokePx = 1.25.dp.toPx()
@@ -372,11 +633,263 @@ fun Modifier.liquidGlass(
             end = Offset(size.width, size.height)
         )
 
+        val bridgeStrokePx = 1.0.dp.toPx()
+        val cornerInsetMax = 14.dp.toPx()
+        val waistPullPx = 4.dp.toPx()
+        val filletMaxW = 5.5.dp.toPx()
+        val filletMaxH = 5.5.dp.toPx()
+        val barRimMarginPx = 14.dp.toPx()
+        val barSoftStrokePx = 2.0.dp.toPx()
+
         onDrawWithContent {
             drawOutline(outline = outline, brush = frostBrush)
             drawOutline(outline = outline, brush = meniscusHighlight)
+
+            if (role == LiquidGlassRole.ORB && orbLocalState != null && size.width > 24f) {
+                val bridgeFillBase = if (isDark) {
+                    solidTint.copy(alpha = (0.86f * safeIntensity).coerceIn(0.78f, 0.94f))
+                } else {
+                    solidTint.copy(alpha = 0.84f)
+                }
+                val bridgeRimBase = if (isDark) {
+                    Color.White.copy(alpha = 0.26f)
+                } else {
+                    Color(0xFF94A3B8).copy(alpha = 0.28f)
+                }
+
+                // 1) Full-width capillary meniscus bridge to header (upward)
+                val topStr = orbLocalState.topBridgeStrength
+                val topGap = orbLocalState.topBridgeGapPx
+                if (topStr > 0.02f && topGap > 0.5f) {
+                    val left = orbLocalState.headerLocalLeftPx
+                    val right = orbLocalState.headerLocalRightPx
+                    val spanW = right - left
+                    if (spanW > 24f) {
+                        val inset = min(cornerInsetMax, spanW * 0.14f)
+                        val baseLeft = left + inset
+                        val baseRight = right - inset
+                        val barSpread = 2.5.dp.toPx() * (1f - topStr)
+                        val topLeft = baseLeft + barSpread
+                        val topRight = baseRight - barSpread
+                        val yBase = if (orbLocalState.topBridgeFromBottomEdge) size.height - 1f else 1f
+                        val yBar = if (orbLocalState.topBridgeFromBottomEdge) size.height - topGap else -topGap
+                        val spanY = yBase - yBar
+                        val waist = waistPullPx * (0.4f + 0.6f * (1f - topStr))
+
+                        val fillPath = Path().apply {
+                            moveTo(baseLeft, yBase)
+                            cubicTo(
+                                baseLeft + waist, yBase - spanY * 0.28f,
+                                topLeft + waist * 0.8f, yBar + spanY * 0.28f,
+                                topLeft, yBar
+                            )
+                            lineTo(topRight, yBar)
+                            cubicTo(
+                                topRight - waist * 0.8f, yBar + spanY * 0.28f,
+                                baseRight - waist, yBase - spanY * 0.28f,
+                                baseRight, yBase
+                            )
+                            close()
+                        }
+                        drawPath(path = fillPath, color = bridgeFillBase.copy(alpha = bridgeFillBase.alpha * topStr))
+
+                        val sideRimPath = Path().apply {
+                            moveTo(baseLeft, yBase)
+                            cubicTo(
+                                baseLeft + waist, yBase - spanY * 0.28f,
+                                topLeft + waist * 0.8f, yBar + spanY * 0.28f,
+                                topLeft, yBar
+                            )
+                            moveTo(topRight, yBar)
+                            cubicTo(
+                                topRight - waist * 0.8f, yBar + spanY * 0.28f,
+                                baseRight - waist, yBase - spanY * 0.28f,
+                                baseRight, yBase
+                            )
+                        }
+                        drawPath(
+                            path = sideRimPath,
+                            color = bridgeRimBase.copy(alpha = bridgeRimBase.alpha * topStr),
+                            style = Stroke(width = bridgeStrokePx, cap = StrokeCap.Round)
+                        )
+                    }
+                }
+
+                // 2) Full-width capillary meniscus bridge to footer (downward)
+                val botStr = orbLocalState.bottomBridgeStrength
+                val botGap = orbLocalState.bottomBridgeGapPx
+                if (botStr > 0.02f && botGap > 0.5f) {
+                    val left = orbLocalState.footerLocalLeftPx
+                    val right = orbLocalState.footerLocalRightPx
+                    val spanW = right - left
+                    if (spanW > 24f) {
+                        val inset = min(cornerInsetMax, spanW * 0.14f)
+                        val baseLeft = left + inset
+                        val baseRight = right - inset
+                        val barSpread = 2.5.dp.toPx() * (1f - botStr)
+                        val botLeft = baseLeft + barSpread
+                        val botRight = baseRight - barSpread
+                        val yBase = if (orbLocalState.bottomBridgeFromTopEdge) 1f else size.height - 1f
+                        val yBar = if (orbLocalState.bottomBridgeFromTopEdge) botGap else size.height + botGap
+                        val spanY = yBar - yBase
+                        val waist = waistPullPx * (0.4f + 0.6f * (1f - botStr))
+
+                        val fillPath = Path().apply {
+                            moveTo(baseLeft, yBase)
+                            cubicTo(
+                                baseLeft + waist, yBase + spanY * 0.28f,
+                                botLeft + waist * 0.8f, yBar - spanY * 0.28f,
+                                botLeft, yBar
+                            )
+                            lineTo(botRight, yBar)
+                            cubicTo(
+                                botRight - waist * 0.8f, yBar - spanY * 0.28f,
+                                baseRight - waist, yBase + spanY * 0.28f,
+                                baseRight, yBase
+                            )
+                            close()
+                        }
+                        drawPath(path = fillPath, color = bridgeFillBase.copy(alpha = bridgeFillBase.alpha * botStr))
+
+                        val sideRimPath = Path().apply {
+                            moveTo(baseLeft, yBase)
+                            cubicTo(
+                                baseLeft + waist, yBase + spanY * 0.28f,
+                                botLeft + waist * 0.8f, yBar - spanY * 0.28f,
+                                botLeft, yBar
+                            )
+                            moveTo(botRight, yBar)
+                            cubicTo(
+                                botRight - waist * 0.8f, yBar - spanY * 0.28f,
+                                baseRight - waist, yBase + spanY * 0.28f,
+                                baseRight, yBase
+                            )
+                        }
+                        drawPath(
+                            path = sideRimPath,
+                            color = bridgeRimBase.copy(alpha = bridgeRimBase.alpha * botStr),
+                            style = Stroke(width = bridgeStrokePx, cap = StrokeCap.Round)
+                        )
+                    }
+                }
+
+                // 3) Concave corner wetting fillets where orb edges meet header/footer seam
+                val hSeam = orbLocalState.headerSeamStrength
+                if (hSeam > 0.02f) {
+                    val sy = orbLocalState.headerSeamYPx
+                    val fw = filletMaxW * hSeam
+                    val fh = filletMaxH * hSeam
+                    if (orbLocalState.headerCanFilletLeft) {
+                        val fPath = Path().apply {
+                            moveTo(0.5f, sy - 0.5f)
+                            lineTo(-fw, sy - 0.5f)
+                            cubicTo(-fw * 0.2f, sy, 0.5f, sy + fh * 0.35f, 0.5f, sy + fh)
+                            close()
+                        }
+                        drawPath(fPath, color = bridgeFillBase.copy(alpha = bridgeFillBase.alpha * hSeam))
+                    }
+                    if (orbLocalState.headerCanFilletRight) {
+                        val fPath = Path().apply {
+                            moveTo(size.width - 0.5f, sy - 0.5f)
+                            lineTo(size.width + fw, sy - 0.5f)
+                            cubicTo(size.width + fw * 0.2f, sy, size.width - 0.5f, sy + fh * 0.35f, size.width - 0.5f, sy + fh)
+                            close()
+                        }
+                        drawPath(fPath, color = bridgeFillBase.copy(alpha = bridgeFillBase.alpha * hSeam))
+                    }
+                }
+
+                val fSeam = orbLocalState.footerSeamStrength
+                if (fSeam > 0.02f) {
+                    val sy = orbLocalState.footerSeamYPx
+                    val fw = filletMaxW * fSeam
+                    val fh = filletMaxH * fSeam
+                    if (orbLocalState.footerCanFilletLeft) {
+                        val fPath = Path().apply {
+                            moveTo(0.5f, sy + 0.5f)
+                            lineTo(-fw, sy + 0.5f)
+                            cubicTo(-fw * 0.2f, sy, 0.5f, sy - fh * 0.35f, 0.5f, sy - fh)
+                            close()
+                        }
+                        drawPath(fPath, color = bridgeFillBase.copy(alpha = bridgeFillBase.alpha * fSeam))
+                    }
+                    if (orbLocalState.footerCanFilletRight) {
+                        val fPath = Path().apply {
+                            moveTo(size.width - 0.5f, sy + 0.5f)
+                            lineTo(size.width + fw, sy + 0.5f)
+                            cubicTo(size.width + fw * 0.2f, sy, size.width - 0.5f, sy - fh * 0.35f, size.width - 0.5f, sy - fh)
+                            close()
+                        }
+                        drawPath(fPath, color = bridgeFillBase.copy(alpha = bridgeFillBase.alpha * fSeam))
+                    }
+                }
+            }
+
             drawContent()
             drawOutline(outline = outline, brush = rimBrush, style = Stroke(width = strokePx))
+
+            // Subtle rim softening along exact contact span when orbs touch header/footer (NO glow)
+            when (role) {
+                LiquidGlassRole.HEADER -> {
+                    if (size.width > 40f && boundary.headerContacts.isNotEmpty()) {
+                        val edgeY = size.height - 0.8f
+                        boundary.headerContacts.values.forEach { span ->
+                            if (span.intensity > 0.02f) {
+                                val segL = (span.leftPx - boundary.headerLeftPx).coerceIn(barRimMarginPx, size.width - barRimMarginPx)
+                                val segR = (span.rightPx - boundary.headerLeftPx).coerceIn(segL, size.width - barRimMarginPx)
+                                if (segR - segL > 12f) {
+                                    drawLine(
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                Color.Transparent,
+                                                solidTint.copy(alpha = 0.55f * span.intensity),
+                                                solidTint.copy(alpha = 0.55f * span.intensity),
+                                                Color.Transparent
+                                            ),
+                                            startX = segL,
+                                            endX = segR
+                                        ),
+                                        start = Offset(segL, edgeY),
+                                        end = Offset(segR, edgeY),
+                                        strokeWidth = barSoftStrokePx,
+                                        cap = StrokeCap.Round
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                LiquidGlassRole.FOOTER -> {
+                    if (size.width > 40f && boundary.footerContacts.isNotEmpty()) {
+                        val edgeY = 0.8f
+                        boundary.footerContacts.values.forEach { span ->
+                            if (span.intensity > 0.02f) {
+                                val segL = (span.leftPx - boundary.footerLeftPx).coerceIn(barRimMarginPx, size.width - barRimMarginPx)
+                                val segR = (span.rightPx - boundary.footerLeftPx).coerceIn(segL, size.width - barRimMarginPx)
+                                if (segR - segL > 12f) {
+                                    drawLine(
+                                        brush = Brush.horizontalGradient(
+                                            colors = listOf(
+                                                Color.Transparent,
+                                                solidTint.copy(alpha = 0.55f * span.intensity),
+                                                solidTint.copy(alpha = 0.55f * span.intensity),
+                                                Color.Transparent
+                                            ),
+                                            startX = segL,
+                                            endX = segR
+                                        ),
+                                        start = Offset(segL, edgeY),
+                                        end = Offset(segR, edgeY),
+                                        strokeWidth = barSoftStrokePx,
+                                        cap = StrokeCap.Round
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                LiquidGlassRole.ORB, LiquidGlassRole.STATIC -> Unit
+            }
         }
     }
 }
@@ -399,7 +912,7 @@ fun Card(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
-    val defaultTint = if (isDark) Color(0xFF09221D) else Color(0xFFF7FBF9)
+    val defaultTint = if (isDark) Color(0xFF09221D) else Color(0xFFFFFFFF)
     val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
         when {
             colors.containerColor.alpha < 0.70f -> {
@@ -421,7 +934,7 @@ fun Card(
     }
     val rimAccent = border?.brush?.let { brush ->
         if (brush is SolidColor) brush.value else BrandCoralPink
-    } ?: if (isDark) BrandCoralPink else BrandMintGreen
+    } ?: if (isDark) BrandCoralPink else Color(0xFFCBD5E1)
 
     val zeroElevation = if (elevation == CardDefaults.cardElevation()) {
         CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
@@ -429,22 +942,38 @@ fun Card(
         CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
     }
 
+    val resolvedContentColor = adaptiveCardContentColor(
+        isDark = isDark,
+        background = glassBaseTint,
+        preferred = if (colors.contentColor != Color.Unspecified) colors.contentColor else if (isDark) Color.White else LightModeInk
+    )
+
+    val isNestedOrb = LocalInsideOrbCard.current
     androidx.compose.material3.Card(
         modifier = modifier
             .liquidGlass(
                 shape = shape,
                 tintColor = glassBaseTint,
-                intensity = if (isDark) 1.05f else 1.12f,
-                accentRimColor = rimAccent
+                intensity = if (isDark) 1.05f else 1.15f,
+                accentRimColor = rimAccent,
+                role = if (isNestedOrb) LiquidGlassRole.STATIC else LiquidGlassRole.ORB
             ),
         shape = shape,
         colors = CardDefaults.cardColors(
             containerColor = Color.Transparent,
-            contentColor = if (colors.contentColor != Color.Unspecified) colors.contentColor else if (isDark) Color.White else BrandForestDark
+            contentColor = resolvedContentColor
         ),
         elevation = zeroElevation,
         border = border,
-        content = content
+        content = {
+            if (isNestedOrb) {
+                content()
+            } else {
+                CompositionLocalProvider(LocalInsideOrbCard provides true) {
+                    content()
+                }
+            }
+        }
     )
 }
 
@@ -461,7 +990,7 @@ fun Card(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = LocalIsDarkTheme.current
-    val defaultTint = if (isDark) Color(0xFF081E19) else Color(0xFFF4FAF7)
+    val defaultTint = if (isDark) Color(0xFF081E19) else Color(0xFFFCFCFD)
     val glassBaseTint = if (colors.containerColor != Color.Unspecified && colors.containerColor != Color.Transparent) {
         when {
             colors.containerColor.alpha < 0.70f -> {
@@ -483,7 +1012,7 @@ fun Card(
     }
     val rimAccent = border?.brush?.let { brush ->
         if (brush is SolidColor) brush.value else BrandCoralPink
-    } ?: if (isDark) BrandCoralPink else BrandMintGreen
+    } ?: if (isDark) BrandCoralPink else Color(0xFFCBD5E1)
 
     val zeroElevation = if (elevation == CardDefaults.cardElevation()) {
         CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
@@ -491,7 +1020,14 @@ fun Card(
         CardDefaults.cardElevation(0.dp, 0.dp, 0.dp, 0.dp, 0.dp, 0.dp)
     }
 
+    val resolvedContentColor = adaptiveCardContentColor(
+        isDark = isDark,
+        background = glassBaseTint,
+        preferred = if (colors.contentColor != Color.Unspecified) colors.contentColor else if (isDark) Color.White else LightModeInk
+    )
+
     // Clickable cards/orbs have higher intensity (1.22f) so they look more solid and readable
+    val isNestedOrb = LocalInsideOrbCard.current
     androidx.compose.material3.Card(
         onClick = onClick,
         modifier = modifier
@@ -499,18 +1035,27 @@ fun Card(
                 shape = shape,
                 tintColor = glassBaseTint,
                 intensity = 1.22f,
-                accentRimColor = rimAccent
+                accentRimColor = rimAccent,
+                role = if (isNestedOrb) LiquidGlassRole.STATIC else LiquidGlassRole.ORB
             ),
         enabled = enabled,
         shape = shape,
         colors = CardDefaults.cardColors(
             containerColor = Color.Transparent,
-            contentColor = if (colors.contentColor != Color.Unspecified) colors.contentColor else if (isDark) Color.White else BrandForestDark
+            contentColor = resolvedContentColor
         ),
         elevation = zeroElevation,
         border = border,
         interactionSource = interactionSource,
-        content = content
+        content = {
+            if (isNestedOrb) {
+                content()
+            } else {
+                CompositionLocalProvider(LocalInsideOrbCard provides true) {
+                    content()
+                }
+            }
+        }
     )
 }
 
@@ -585,6 +1130,7 @@ fun AlertDialog(
     } else {
         Color.White.copy(alpha = 0.95f)
     }
+    val isDarkDialog = baseGlass.luminance() < 0.35f
     val zeroTonalElevation = if (tonalElevation > 0.dp) 0.dp else 0.dp
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismissRequest,
@@ -604,8 +1150,8 @@ fun AlertDialog(
         shape = shape,
         containerColor = Color.Transparent,
         iconContentColor = iconContentColor,
-        titleContentColor = if (titleContentColor != Color.Unspecified) titleContentColor else if (isDark) Color.White else BrandForestDark,
-        textContentColor = if (textContentColor != Color.Unspecified) textContentColor else if (isDark) Color.White.copy(alpha = 0.95f) else BrandForestDark.copy(alpha = 0.95f),
+        titleContentColor = if (titleContentColor != Color.Unspecified) titleContentColor else if (isDarkDialog) Color.White else LightModeInk,
+        textContentColor = if (textContentColor != Color.Unspecified) textContentColor else if (isDarkDialog) Color.White.copy(alpha = 0.95f) else LightModeInk.copy(alpha = 0.95f),
         tonalElevation = zeroTonalElevation,
         properties = properties
     )
@@ -1077,7 +1623,11 @@ data class ShareParcel(
     val units: Double,
     val purchasePrice: Double,
     val currentPrice: Double,
-    val purchaseDate: String = ""
+    val purchaseDate: String = "",
+    val market: String = "ASX",
+    val usdPurchasePrice: Double = 0.0,
+    val usdCurrentPrice: Double = 0.0,
+    val fxRateAtSync: Double = 0.0
 )
 
 data class GroupedShareHolding(
@@ -1085,6 +1635,9 @@ data class GroupedShareHolding(
     val owners: List<String>,
     val parcels: List<ShareParcel>
 ) {
+    val market: String = parcels.firstOrNull()?.market?.uppercase()?.takeIf { it == "US" } ?: "ASX"
+    val isUsMarket: Boolean get() = market == "US"
+    val holdingKey: String get() = "$market:${code.uppercase()}"
     val totalUnits: Double = parcels.sumOf { it.units }
     val currentPrice: Double = parcels.firstOrNull { it.currentPrice > 0 }?.currentPrice
         ?: parcels.firstOrNull()?.currentPrice ?: 0.0
@@ -1093,9 +1646,33 @@ data class GroupedShareHolding(
     val averagePurchasePrice: Double = if (totalUnits > 0) totalCostBasis / totalUnits else 0.0
     val totalGainLoss: Double = totalMarketValue - totalCostBasis
     val gainLossPct: Double = if (totalCostBasis > 0) (totalGainLoss / totalCostBasis) * 100 else 0.0
+
+    val fxRate: Double = parcels.firstOrNull { it.fxRateAtSync > 0 }?.fxRateAtSync ?: 0.0
+    val usdCurrentPrice: Double = parcels.firstOrNull { it.usdCurrentPrice > 0 }?.usdCurrentPrice
+        ?: if (isUsMarket && fxRate > 0 && currentPrice > 0) currentPrice / fxRate else 0.0
+    val usdTotalCostBasis: Double = parcels.sumOf { p ->
+        val pUsd = when {
+            p.usdPurchasePrice > 0 -> p.usdPurchasePrice
+            p.fxRateAtSync > 0 && p.purchasePrice > 0 -> p.purchasePrice / p.fxRateAtSync
+            fxRate > 0 && p.purchasePrice > 0 -> p.purchasePrice / fxRate
+            else -> 0.0
+        }
+        p.units * pUsd
+    }
+    val usdTotalMarketValue: Double = totalUnits * usdCurrentPrice
+    val usdAveragePurchasePrice: Double = if (totalUnits > 0) usdTotalCostBasis / totalUnits else 0.0
+    val usdTotalGainLoss: Double = usdTotalMarketValue - usdTotalCostBasis
+    val usdGainLossPct: Double = if (usdTotalCostBasis > 0) (usdTotalGainLoss / usdTotalCostBasis) * 100 else 0.0
 }
 
-val AppDateDisplayFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
+@Composable
+@ReadOnlyComposable
+private fun currentLocale(): Locale {
+    val locales = LocalConfiguration.current.locales
+    return if (locales.isEmpty) Locale.ENGLISH else locales[0]
+}
+
+fun appDateDisplayFormatter(): DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
 
 fun parseFlexibleDate(dateStr: String): LocalDate? {
     val trimmed = dateStr.trim()
@@ -1125,14 +1702,14 @@ fun formatDisplayDate(dateStr: String): String {
     val trimmed = dateStr.trim()
     if (trimmed.isBlank()) return ""
     val parsed = parseFlexibleDate(trimmed)
-    return parsed?.format(AppDateDisplayFormatter) ?: trimmed
+    return parsed?.format(appDateDisplayFormatter()) ?: trimmed
 }
 
 fun formatParcelDate(parcel: ShareParcel): String {
     if (parcel.purchaseDate.isNotBlank()) {
         try {
             val ld = parseFlexibleDate(parcel.purchaseDate)
-            if (ld != null) return ld.format(AppDateDisplayFormatter)
+            if (ld != null) return ld.format(appDateDisplayFormatter())
             return parcel.purchaseDate
         } catch (_: Exception) {
             return parcel.purchaseDate
@@ -1143,7 +1720,7 @@ fun formatParcelDate(parcel: ShareParcel): String {
         try {
             val epoch = match.value.toLong()
             val date = Instant.ofEpochMilli(epoch).atZone(ZoneId.systemDefault()).toLocalDate()
-            return date.format(AppDateDisplayFormatter)
+            return date.format(appDateDisplayFormatter())
         } catch (_: Exception) {}
     }
     return "Initial Purchase"
@@ -1211,17 +1788,24 @@ class MainActivity : FragmentActivity() {
                 )
             } else {
                 lightColorScheme(
-                    primary = BrandForestDark,
+                    primary = LightModeInk,
                     onPrimary = Color.White,
+                    primaryContainer = Color(0xFFE2E8F0),
+                    onPrimaryContainer = LightModeInk,
                     secondary = BrandCoralPink,
+                    onSecondary = LightModeInk,
+                    secondaryContainer = LightModeInk,
+                    onSecondaryContainer = Color.White,
                     tertiary = BrandWarmAmber,
                     error = BrandCoralRed,
                     background = Color.Transparent,
-                    surface = Color.White.copy(alpha = 0.90f),
-                    onBackground = BrandForestDark,
-                    onSurface = BrandForestDark,
-                    surfaceVariant = Color(0xFFDCECE7).copy(alpha = 0.88f),
-                    onSurfaceVariant = BrandForestDark
+                    surface = Color.White.copy(alpha = 0.96f),
+                    onBackground = LightModeInk,
+                    onSurface = LightModeInk,
+                    surfaceVariant = Color(0xFFE2E8F0),
+                    onSurfaceVariant = LightModeInkSecondary,
+                    outline = Color(0xFF64748B),
+                    outlineVariant = Color(0xFFCBD5E1)
                 )
             }
 
@@ -1305,7 +1889,7 @@ fun generateAmortizationSchedule(
     rows.add(
         AmortizationRow(
             fortnightNumber = 0,
-            paymentDate = currentDate.format(AppDateDisplayFormatter),
+            paymentDate = currentDate.format(appDateDisplayFormatter()),
             payment = 0.0,
             monthlyInterestCharged = 0.0,
             accruedInterest = 0.0,
@@ -1336,7 +1920,7 @@ fun generateAmortizationSchedule(
         rows.add(
             AmortizationRow(
                 fortnightNumber = fn,
-                paymentDate = currentDate.format(AppDateDisplayFormatter),
+                paymentDate = currentDate.format(appDateDisplayFormatter()),
                 payment = actualPayment,
                 monthlyInterestCharged = monthlyCharged,
                 accruedInterest = accrued,
@@ -1408,7 +1992,10 @@ fun computeWhatIfProjection(
     rentalIncomeGrowthWeekly: Float,
     superBoostWeekly: Float,
     customLevers: List<CustomWhatIfLever>,
-    milestones: List<LifeMilestoneBlock>
+    milestones: List<LifeMilestoneBlock>,
+    prop1LiveBalance: Double = -1.0,
+    prop2LiveBalance: Double = -1.0,
+    isProperty2Rented: Boolean = false
 ): WhatIfProjectionResult {
     val activeCustomLevers = customLevers.filter { it.isEnabled }
     val customWeeklyCashflow = activeCustomLevers
@@ -1427,61 +2014,107 @@ fun computeWhatIfProjection(
     val effectiveShock1 = rateShockProp1 + customRateDelta
     val effectiveShock2 = rateShockProp2 + customRateDelta
 
-    val weeklyRateDelta1 = if (showLoans) {
-        val basePmt1 = calculateEffectiveFortnightlyRepayment(prop1Loan)
-        val shockedRate1 = (prop1Loan.interestRatePa + effectiveShock1).coerceAtLeast(0.5)
-        val shockedPmt1 = calculateEffectiveFortnightlyRepayment(prop1Loan, shockedRate1)
-        (shockedPmt1 - basePmt1) / 2.0
-    } else 0.0
+    val p1Bal0 = if (!showLoans) 0.0
+    else if (prop1LiveBalance >= 0.0) prop1LiveBalance
+    else prop1Loan.startLoanBalance.coerceAtLeast(0.0)
 
-    val weeklyRateDelta2 = if (showLoans && hasSecondProperty) {
-        val basePmt2 = calculateEffectiveFortnightlyRepayment(prop2Loan)
-        val shockedRate2 = (prop2Loan.interestRatePa + effectiveShock2).coerceAtLeast(0.5)
-        val shockedPmt2 = calculateEffectiveFortnightlyRepayment(prop2Loan, shockedRate2)
-        (shockedPmt2 - basePmt2) / 2.0
-    } else if (rateShockProp2 != 0f) {
-        // Allow Property 2 Rate Lever to model a $500k investment loan if 2nd property is not yet enabled
-        val fallbackLoan = if (prop2Loan.startLoanBalance > 0.0 || prop2Loan.originalLoanAmount > 0.0) {
-            prop2Loan
-        } else {
-            LoanConfig("Property 2", LocalDate.now().toString(), 500000.0, 30, 500000.0, 30.0, 6.25, 0.0)
+    val p2Bal0 = if (!showLoans || !hasSecondProperty || isProperty2Rented) 0.0
+    else if (prop2LiveBalance >= 0.0) prop2LiveBalance
+    else prop2Loan.startLoanBalance.coerceAtLeast(0.0)
+
+    val extraBaseLiab0 = (baseLiabilitiesVal - (p1Bal0 + p2Bal0)).coerceAtLeast(0.0)
+
+    val hasActiveProp1Loan = showLoans && p1Bal0 > 0.0
+    val hasActiveProp2Loan = showLoans && hasSecondProperty && !isProperty2Rented && p2Bal0 > 0.0
+
+    val baseRate1 = prop1Loan.interestRatePa.coerceAtLeast(0.0)
+    val shockedRate1 = (prop1Loan.interestRatePa + effectiveShock1).coerceAtLeast(0.5)
+    val baseFnPmt1 = if (hasActiveProp1Loan) calculateEffectiveFortnightlyRepayment(prop1Loan) else 0.0
+    val shockedFnPmt1 = if (hasActiveProp1Loan) calculateEffectiveFortnightlyRepayment(prop1Loan, shockedRate1) else 0.0
+    val weeklyRateDelta1 = (shockedFnPmt1 - baseFnPmt1) / 2.0
+
+    val baseRate2 = prop2Loan.interestRatePa.coerceAtLeast(0.0)
+    val shockedRate2 = (prop2Loan.interestRatePa + effectiveShock2).coerceAtLeast(0.5)
+    val baseFnPmt2 = if (hasActiveProp2Loan) calculateEffectiveFortnightlyRepayment(prop2Loan) else 0.0
+    val shockedFnPmt2 = if (hasActiveProp2Loan) calculateEffectiveFortnightlyRepayment(prop2Loan, shockedRate2) else 0.0
+    val weeklyRateDelta2 = when {
+        hasActiveProp2Loan -> (shockedFnPmt2 - baseFnPmt2) / 2.0
+        rateShockProp2 != 0f -> {
+            // Allow Property 2 Rate Lever to model a hypothetical $500k investment loan if 2nd property is not yet enabled
+            val fallbackLoan = if (prop2Loan.startLoanBalance > 0.0 || prop2Loan.originalLoanAmount > 0.0) {
+                prop2Loan
+            } else {
+                LoanConfig("Property 2", LocalDate.now().toString(), 500000.0, 30, 500000.0, 30.0, 6.25, 0.0)
+            }
+            val fbBase = calculateEffectiveFortnightlyRepayment(fallbackLoan)
+            val fbShockedRate = (fallbackLoan.interestRatePa + effectiveShock2).coerceAtLeast(0.5)
+            val fbShocked = calculateEffectiveFortnightlyRepayment(fallbackLoan, fbShockedRate)
+            (fbShocked - fbBase) / 2.0
         }
-        val basePmt2 = calculateEffectiveFortnightlyRepayment(fallbackLoan)
-        val shockedRate2 = (fallbackLoan.interestRatePa + effectiveShock2).coerceAtLeast(0.5)
-        val shockedPmt2 = calculateEffectiveFortnightlyRepayment(fallbackLoan, shockedRate2)
-        (shockedPmt2 - basePmt2) / 2.0
-    } else 0.0
+        else -> 0.0
+    }
 
     val totalWeeklyRateCost = weeklyRateDelta1 + weeklyRateDelta2
+    val hypotheticalRateCostWeekly = if (!hasActiveProp2Loan) weeklyRateDelta2 else 0.0
+
+    // Separate fixed nominal mortgage P&I repayments from inflating pre-loan surplus
+    val p1AnnualPmtBase = baseFnPmt1 * 26.0
+    val p1AnnualPmtShocked = shockedFnPmt1 * 26.0
+    val p2AnnualPmtBase = baseFnPmt2 * 26.0
+    val p2AnnualPmtShocked = shockedFnPmt2 * 26.0
+    val basePreLoanSurplusWeekly = baseSurplusWeekly + ((p1AnnualPmtBase + p2AnnualPmtBase) / 52.0)
 
     val baseAssets = basePropertyVal + baseSharesAndSuperVal + baseOtherAssetsVal + baseOffsetsVal
     val baseNetWorth = baseAssets - baseLiabilitiesVal
+    val safeHorizon = horizonYears.coerceIn(1, 40)
 
     // Path A: Status Quo Baseline Compounding Trajectory
     val pathASeries = mutableListOf<Double>()
     var aProp = basePropertyVal
     var aSharesSuper = baseSharesAndSuperVal
     var aLiquid = baseOffsetsVal
-    var aLiab = baseLiabilitiesVal
+    var aP1Bal = p1Bal0
+    var aP2Bal = p2Bal0
+    var aExtraLiab = extraBaseLiab0
     pathASeries.add(baseNetWorth)
 
-    val safeHorizon = horizonYears.coerceIn(1, 40)
-    var currentStatusQuoAnnualSurplus = baseSurplusWeekly * 52.0
-    repeat(safeHorizon) {
+    for (year in 1..safeHorizon) {
         aProp *= 1.04
         aSharesSuper *= 1.075
-        
-        if (showLoans) {
-            aLiquid += currentStatusQuoAnnualSurplus
-        } else {
-            aLiquid = (aLiquid * 1.045) + currentStatusQuoAnnualSurplus
-        }
-        currentStatusQuoAnnualSurplus *= 1.03
 
-        val debtPaydown = (aLiab * 0.035).coerceAtMost(aLiab)
-        aLiab = (aLiab - debtPaydown).coerceAtLeast(0.0)
-        val nw = (aProp + aSharesSuper + baseOtherAssetsVal + aLiquid) - aLiab
-        pathASeries.add(nw)
+        var nonLoanAnnualA = basePreLoanSurplusWeekly * 52.0
+        if (year > 1) {
+            nonLoanAnnualA *= 1.03.pow((year - 1).toDouble())
+        }
+
+        // Offset cash reduces mortgage interest charged first; excess positive cash earns 4.5% HISA
+        var remainingOffsetA = aLiquid.coerceAtLeast(0.0)
+        var paid1A = 0.0
+        if (aP1Bal > 0.0) {
+            val offset1A = min(aP1Bal, remainingOffsetA)
+            remainingOffsetA -= offset1A
+            val interest1A = (aP1Bal - offset1A) * (baseRate1 / 100.0)
+            paid1A = min(p1AnnualPmtBase, aP1Bal + interest1A)
+            aP1Bal = (aP1Bal + interest1A - paid1A).coerceAtLeast(0.0)
+        }
+        var paid2A = 0.0
+        if (aP2Bal > 0.0) {
+            val offset2A = min(aP2Bal, remainingOffsetA)
+            remainingOffsetA -= offset2A
+            val interest2A = (aP2Bal - offset2A) * (baseRate2 / 100.0)
+            paid2A = min(p2AnnualPmtBase, aP2Bal + interest2A)
+            aP2Bal = (aP2Bal + interest2A - paid2A).coerceAtLeast(0.0)
+        }
+
+        val hisaInterestA = remainingOffsetA * 0.045
+        aLiquid += nonLoanAnnualA - paid1A - paid2A + hisaInterestA
+
+        val extraPaydownA = (aExtraLiab * 0.035).coerceAtMost(aExtraLiab)
+        aExtraLiab = (aExtraLiab - extraPaydownA).coerceAtLeast(0.0)
+
+        val totalLiabA = aP1Bal + aP2Bal + aExtraLiab
+        val nwA = (aProp + aSharesSuper + baseOtherAssetsVal + aLiquid) - totalLiabA
+        pathASeries.add(nwA)
     }
 
     // Path B: Simulated What-If Plan Compounding Trajectory
@@ -1490,63 +2123,104 @@ fun computeWhatIfProjection(
     var bSharesSuper = baseSharesAndSuperVal
     var bOther = baseOtherAssetsVal
     var bLiquid = baseOffsetsVal + customLumpSum
-    var bLiab = baseLiabilitiesVal
+    var bP1Bal = p1Bal0
+    var bP2Bal = p2Bal0
+    var bExtraLiab = extraBaseLiab0
     var bExtraSuper = 0.0
     var foundDeficitYear: Int? = null
 
     pathBSeries.add(baseNetWorth + customLumpSum)
 
     val activeMilestones = milestones.filter { it.isEnabled }
+    val effRate1 = if (hasActiveProp1Loan) shockedRate1 else baseRate1
+    val effRate2 = if (hasActiveProp2Loan) shockedRate2 else baseRate2
+
     for (year in 1..safeHorizon) {
         var activeWeeklyDelta =
-            lifestyleAdjustmentWeekly.toDouble() + incomeGrowthWeekly.toDouble() - totalWeeklyRateCost + rentalIncomeGrowthWeekly.toDouble() + customWeeklyCashflow
+            lifestyleAdjustmentWeekly.toDouble() +
+                incomeGrowthWeekly.toDouble() +
+                rentalIncomeGrowthWeekly.toDouble() +
+                customWeeklyCashflow -
+                hypotheticalRateCostWeekly -
+                (superBoostWeekly.toDouble() * 0.68)
         var propAssetAdd = 0.0
         var investAssetAdd = 0.0
         var otherAssetAdd = 0.0
         var liabAdd = 0.0
+        var milestoneCashOutflow = 0.0
 
         activeMilestones.forEach { m ->
             if (year >= m.startYear && year < m.startYear + m.durationYears) {
                 activeWeeklyDelta += m.weeklyCashflowImpact
             }
             if (year == m.startYear) {
-                when (m.category) {
-                    MilestoneCategory.PROPERTY -> propAssetAdd += m.assetImpact
-                    MilestoneCategory.INVESTMENT -> investAssetAdd += m.assetImpact
-                    else -> otherAssetAdd += m.assetImpact
+                if (m.assetImpact < 0.0) {
+                    // Cash purchase / lifestyle spend comes from liquid cash rather than creating negative asset value
+                    milestoneCashOutflow += -m.assetImpact
+                } else {
+                    when (m.category) {
+                        MilestoneCategory.PROPERTY -> propAssetAdd += m.assetImpact
+                        MilestoneCategory.INVESTMENT -> investAssetAdd += m.assetImpact
+                        else -> otherAssetAdd += m.assetImpact
+                    }
+                    // Property purchases with a loan require a cash deposit (asset - loan) from liquid reserves
+                    if (m.category == MilestoneCategory.PROPERTY && m.assetImpact > 0.0 && m.liabilityImpact > 0.0) {
+                        milestoneCashOutflow += (m.assetImpact - m.liabilityImpact).coerceAtLeast(0.0)
+                    }
                 }
                 liabAdd += m.liabilityImpact
             }
         }
 
-        // Base surplus + active delta, with 3% annual wage/rental growth compounding each year
-        var annualNetSurplus = (baseSurplusWeekly + activeWeeklyDelta) * 52.0
+        // Deduct upfront milestone deposits / cash purchases from liquid cash before offset/HISA interest
+        bLiquid -= milestoneCashOutflow
+
+        // Base pre-loan surplus + non-loan weekly deltas, inflating at 3% p.a.
+        var nonLoanAnnualB = (basePreLoanSurplusWeekly + activeWeeklyDelta) * 52.0
         if (year > 1) {
-            annualNetSurplus *= 1.03.pow((year - 1).toDouble())
+            nonLoanAnnualB *= 1.03.pow((year - 1).toDouble())
         }
 
-        val annualSuperBoost = superBoostWeekly.toDouble() * 52.0
+        // Concessional super salary sacrifice: 15% super contributions tax, compounding at 7.5% p.a.
+        val annualNetSuperBoost = superBoostWeekly.toDouble() * 0.85 * 52.0
 
         bProp = (bProp + propAssetAdd) * 1.04
         bSharesSuper = (bSharesSuper + investAssetAdd + customAnnualAssetBoost) * 1.075
-        bExtraSuper = (bExtraSuper + annualSuperBoost) * 1.08
+        bExtraSuper = (bExtraSuper + annualNetSuperBoost) * 1.075
         bOther += otherAssetAdd
 
-        // 4.5% savings interest in tenant/HISA mode, or pure accumulation in offset mode + annual net surplus
-        if (showLoans) {
-            bLiquid += annualNetSurplus
-        } else {
-            bLiquid = (bLiquid * 1.045) + annualNetSurplus
+        var remainingOffsetB = bLiquid.coerceAtLeast(0.0)
+        var paid1B = 0.0
+        if (bP1Bal > 0.0) {
+            val offset1B = min(bP1Bal, remainingOffsetB)
+            remainingOffsetB -= offset1B
+            val interest1B = (bP1Bal - offset1B) * (effRate1 / 100.0)
+            paid1B = min(p1AnnualPmtShocked, bP1Bal + interest1B)
+            bP1Bal = (bP1Bal + interest1B - paid1B).coerceAtLeast(0.0)
         }
+        var paid2B = 0.0
+        if (bP2Bal > 0.0) {
+            val offset2B = min(bP2Bal, remainingOffsetB)
+            remainingOffsetB -= offset2B
+            val interest2B = (bP2Bal - offset2B) * (effRate2 / 100.0)
+            paid2B = min(p2AnnualPmtShocked, bP2Bal + interest2B)
+            bP2Bal = (bP2Bal + interest2B - paid2B).coerceAtLeast(0.0)
+        }
+
+        val hisaInterestB = remainingOffsetB * 0.045
+        bLiquid += nonLoanAnnualB - paid1B - paid2B + hisaInterestB
+
         if (bLiquid < 0.0 && foundDeficitYear == null) {
             foundDeficitYear = year
         }
 
-        val debtPaydown = ((bLiab + liabAdd).coerceAtLeast(0.0) * 0.035).coerceAtMost((bLiab + liabAdd).coerceAtLeast(0.0))
-        bLiab = (bLiab + liabAdd - debtPaydown).coerceAtLeast(0.0)
+        val combinedExtraLiab = (bExtraLiab + liabAdd).coerceAtLeast(0.0)
+        val extraPaydownB = (combinedExtraLiab * 0.035).coerceAtMost(combinedExtraLiab)
+        bExtraLiab = (combinedExtraLiab - extraPaydownB).coerceAtLeast(0.0)
 
-        val nw = (bProp + bSharesSuper + bExtraSuper + bOther + bLiquid) - bLiab
-        pathBSeries.add(nw)
+        val totalLiabB = bP1Bal + bP2Bal + bExtraLiab
+        val nwB = (bProp + bSharesSuper + bExtraSuper + bOther + bLiquid) - totalLiabB
+        pathBSeries.add(nwB)
     }
 
     return WhatIfProjectionResult(
@@ -1910,7 +2584,11 @@ fun ExpenseTrackerApp(
                         units = o.getDouble("units"),
                         purchasePrice = o.getDouble("purchasePrice"),
                         currentPrice = o.optDouble("currentPrice", o.getDouble("purchasePrice")),
-                        purchaseDate = o.optString("purchaseDate", "")
+                        purchaseDate = o.optString("purchaseDate", ""),
+                        market = o.optString("market", "ASX").uppercase().takeIf { it == "US" } ?: "ASX",
+                        usdPurchasePrice = o.optDouble("usdPurchasePrice", 0.0),
+                        usdCurrentPrice = o.optDouble("usdCurrentPrice", 0.0),
+                        fxRateAtSync = o.optDouble("fxRateAtSync", 0.0)
                     )
                 )
             }
@@ -2063,6 +2741,10 @@ fun ExpenseTrackerApp(
                 obj.put("purchasePrice", it.purchasePrice)
                 obj.put("currentPrice", it.currentPrice)
                 obj.put("purchaseDate", it.purchaseDate)
+                obj.put("market", it.market)
+                obj.put("usdPurchasePrice", it.usdPurchasePrice)
+                obj.put("usdCurrentPrice", it.usdCurrentPrice)
+                obj.put("fxRateAtSync", it.fxRateAtSync)
                 arr.put(obj)
             }
             sharedPrefs.edit { putString("local_shares_portfolio", arr.toString()) }
@@ -2076,7 +2758,11 @@ fun ExpenseTrackerApp(
                 "units" to it.units,
                 "purchasePrice" to it.purchasePrice,
                 "currentPrice" to it.currentPrice,
-                "purchaseDate" to it.purchaseDate
+                "purchaseDate" to it.purchaseDate,
+                "market" to it.market,
+                "usdPurchasePrice" to it.usdPurchasePrice,
+                "usdCurrentPrice" to it.usdCurrentPrice,
+                "fxRateAtSync" to it.fxRateAtSync
             )
         }
         updateFirestore("shares_portfolio", serializedList)
@@ -2292,7 +2978,11 @@ fun ExpenseTrackerApp(
                             units = (it["units"] as? Number)?.toDouble() ?: 0.0,
                             purchasePrice = (it["purchasePrice"] as? Number)?.toDouble() ?: 0.0,
                             currentPrice = (it["currentPrice"] as? Number)?.toDouble() ?: 0.0,
-                            purchaseDate = it["purchaseDate"] as? String ?: ""
+                            purchaseDate = it["purchaseDate"] as? String ?: "",
+                            market = (it["market"] as? String)?.uppercase()?.takeIf { m -> m == "US" } ?: "ASX",
+                            usdPurchasePrice = (it["usdPurchasePrice"] as? Number)?.toDouble() ?: 0.0,
+                            usdCurrentPrice = (it["usdCurrentPrice"] as? Number)?.toDouble() ?: 0.0,
+                            fxRateAtSync = (it["fxRateAtSync"] as? Number)?.toDouble() ?: 0.0
                         )
                     } catch (_: Exception) { null }
                 }
@@ -2308,6 +2998,10 @@ fun ExpenseTrackerApp(
                         obj.put("purchasePrice", it.purchasePrice)
                         obj.put("currentPrice", it.currentPrice)
                         obj.put("purchaseDate", it.purchaseDate)
+                        obj.put("market", it.market)
+                        obj.put("usdPurchasePrice", it.usdPurchasePrice)
+                        obj.put("usdCurrentPrice", it.usdCurrentPrice)
+                        obj.put("fxRateAtSync", it.fxRateAtSync)
                         arr.put(obj)
                     }
                     sharedPrefs.edit { putString("local_shares_portfolio", arr.toString()) }
@@ -2618,8 +3312,8 @@ fun ExpenseTrackerApp(
     val otherVal = remember(appConfig.showOtherAssets, otherAssetsList) {
         if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
     }
-    val offsetsVal = remember(appConfig.showLoans, appConfig.isProperty1Rented, appConfig.hasSecondProperty, prop1Loan.offsetBalance, prop2Loan.offsetBalance) {
-        if (appConfig.showLoans && !appConfig.isProperty1Rented) prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0) else 0.0
+    val offsetsVal = remember(appConfig.showLoans, appConfig.isProperty1Rented, appConfig.hasSecondProperty, appConfig.isProperty2Rented, prop1Loan.offsetBalance, prop2Loan.offsetBalance) {
+        if (appConfig.showLoans && !appConfig.isProperty1Rented) prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) prop2Loan.offsetBalance else 0.0) else 0.0
     }
     val cashSavingsVal = remember(appConfig.isProperty1Rented, appConfig.isCoupleMode, person1Savings, person2Savings) {
         if (appConfig.isProperty1Rented) person1Savings + (if (appConfig.isCoupleMode) person2Savings else 0.0) else 0.0
@@ -2675,8 +3369,8 @@ fun ExpenseTrackerApp(
     val fullWhatIfProj = remember(
         maxProjectionHorizon,
         prop1Val, prop2Val, sharesVal, superVal, otherVal, offsetsVal, cashSavingsVal,
-        exactTotalLiabilities, whatIfBaseSurplusWeekly, prop1Loan, prop2Loan,
-        appConfig.hasSecondProperty, appConfig.showLoans, appConfig.isProperty1Rented,
+        exactTotalLiabilities, whatIfBaseSurplusWeekly, prop1Loan, prop2Loan, prop1LiveBalance, prop2LiveBalance,
+        appConfig.hasSecondProperty, appConfig.showLoans, appConfig.isProperty1Rented, appConfig.isProperty2Rented,
         whatIfLifestyleAdjustmentWeekly, totalWhatIfIncomeGrowthWeekly,
         whatIfRateShockProp1, whatIfRateShockProp2, whatIfRentalGrowthWeekly,
         whatIfSuperBoostWeekly, whatIfCustomLevers.toList(), whatIfMilestoneList.toList()
@@ -2700,7 +3394,10 @@ fun ExpenseTrackerApp(
             rentalIncomeGrowthWeekly = if (appConfig.isProperty1Rented) -whatIfRentalGrowthWeekly else whatIfRentalGrowthWeekly,
             superBoostWeekly = whatIfSuperBoostWeekly,
             customLevers = whatIfCustomLevers,
-            milestones = whatIfMilestoneList
+            milestones = whatIfMilestoneList,
+            prop1LiveBalance = prop1LiveBalance,
+            prop2LiveBalance = prop2LiveBalance,
+            isProperty2Rented = appConfig.isProperty2Rented
         )
     }
 
@@ -2771,7 +3468,7 @@ fun ExpenseTrackerApp(
             if (sharesList.isNotEmpty()) {
                 val totalSharesCost = sharesList.sumOf { it.units * it.purchasePrice }
                 val totalSharesGain = sharesVal - totalSharesCost
-                append("Shares Portfolio (${sharesList.size} holdings, Total Market Value ${formatCurrency(sharesVal, 0)}, Cost Basis ${formatCurrency(totalSharesCost, 0)}, Net Gain/Loss ${formatCurrency(totalSharesGain, 0)}): ${sharesList.joinToString { "${it.code} (${it.owner}, ${it.units} units @ ${formatCurrency(it.currentPrice, 2)}, Purchase Price ${formatCurrency(it.purchasePrice, 2)}, Market Value ${formatCurrency(it.units * it.currentPrice, 0)}, Gain/Loss ${formatCurrency((it.currentPrice - it.purchasePrice) * it.units, 0)})" }}. ")
+                append("Shares Portfolio (${sharesList.size} holdings, Total Market Value ${formatCurrency(sharesVal, 0)}, Cost Basis ${formatCurrency(totalSharesCost, 0)}, Net Gain/Loss ${formatCurrency(totalSharesGain, 0)}): ${sharesList.joinToString { "${it.code} [${it.market}] (${it.owner}, ${it.units} units @ ${formatCurrency(it.currentPrice, 2)}${if (it.market == "US" && it.usdCurrentPrice > 0) " / ${formatUsdCurrency(it.usdCurrentPrice, 2)}" else ""}, Purchase Price ${formatCurrency(it.purchasePrice, 2)}, Market Value ${formatCurrency(it.units * it.currentPrice, 0)}, Gain/Loss ${formatCurrency((it.currentPrice - it.purchasePrice) * it.units, 0)})" }}. ")
             }
 
             append("\n\n5. OTHER ASSETS TAB (UNMASKED): ")
@@ -3468,6 +4165,7 @@ fun ExpenseTrackerApp(
                     ),
                 shape = headerGlassShape,
                 color = Color.Transparent,
+                contentColor = Color.White,
                 tonalElevation = 0.dp
             ) {
                 Row(
@@ -3509,6 +4207,7 @@ fun ExpenseTrackerApp(
                         Surface(
                             shape = CircleShape,
                             color = Color.Transparent,
+                            contentColor = Color.White,
                             modifier = Modifier
                                 .size(28.dp)
                                 .liquidGlass(
@@ -3754,9 +4453,10 @@ fun ExpenseTrackerApp(
             saveList("prop2_items", updated)
         }
     }
-    val onAddShareCallback: (String, String, Double, Double, Double, String) -> Unit = remember {
-        { code, owner, units, pPrice, cPrice, purchaseDate ->
+    val onAddShareCallback: (String, String, Double, Double, Double, String, String, Double, Double, Double) -> Unit = remember {
+        { code, owner, units, pPrice, cPrice, purchaseDate, market, usdPPrice, usdCPrice, fxRate ->
             val upperCode = code.trim().uppercase()
+            val cleanMarket = market.trim().uppercase().takeIf { it == "US" } ?: "ASX"
             val newParcel = ShareParcel(
                 id = "sp_${System.currentTimeMillis()}",
                 code = upperCode,
@@ -3764,17 +4464,28 @@ fun ExpenseTrackerApp(
                 units = units,
                 purchasePrice = pPrice,
                 currentPrice = cPrice,
-                purchaseDate = purchaseDate.ifBlank { LocalDate.now().toString() }
+                purchaseDate = purchaseDate.ifBlank { LocalDate.now().toString() },
+                market = cleanMarket,
+                usdPurchasePrice = usdPPrice,
+                usdCurrentPrice = usdCPrice,
+                fxRateAtSync = fxRate
             )
             val updated = sharesList.map {
-                if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) it.copy(currentPrice = cPrice) else it
+                if (it.code.equals(upperCode, ignoreCase = true) && it.market.equals(cleanMarket, ignoreCase = true) && cPrice > 0) {
+                    it.copy(
+                        currentPrice = cPrice,
+                        usdCurrentPrice = if (usdCPrice > 0) usdCPrice else it.usdCurrentPrice,
+                        fxRateAtSync = if (fxRate > 0) fxRate else it.fxRateAtSync
+                    )
+                } else it
             } + newParcel
             saveSharesList(updated)
         }
     }
-    val onEditShareCallback: (String, String, String, Double, Double, Double, String) -> Unit = remember {
-        { id, code, owner, units, pPrice, cPrice, purchaseDate ->
+    val onEditShareCallback: (String, String, String, Double, Double, Double, String, String, Double, Double, Double) -> Unit = remember {
+        { id, code, owner, units, pPrice, cPrice, purchaseDate, market, usdPPrice, usdCPrice, fxRate ->
             val upperCode = code.trim().uppercase()
+            val cleanMarket = market.trim().uppercase().takeIf { it == "US" } ?: "ASX"
             val updated = sharesList.map {
                 if (it.id == id) {
                     it.copy(
@@ -3783,10 +4494,18 @@ fun ExpenseTrackerApp(
                         units = units,
                         purchasePrice = pPrice,
                         currentPrice = cPrice,
-                        purchaseDate = purchaseDate
+                        purchaseDate = purchaseDate,
+                        market = cleanMarket,
+                        usdPurchasePrice = usdPPrice,
+                        usdCurrentPrice = usdCPrice,
+                        fxRateAtSync = fxRate
                     )
-                } else if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) {
-                    it.copy(currentPrice = cPrice)
+                } else if (it.code.equals(upperCode, ignoreCase = true) && it.market.equals(cleanMarket, ignoreCase = true) && cPrice > 0) {
+                    it.copy(
+                        currentPrice = cPrice,
+                        usdCurrentPrice = if (usdCPrice > 0) usdCPrice else it.usdCurrentPrice,
+                        fxRateAtSync = if (fxRate > 0) fxRate else it.fxRateAtSync
+                    )
                 } else {
                     it
                 }
@@ -3838,6 +4557,10 @@ fun ExpenseTrackerApp(
     }
 
     var rootCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val hostViewId = System.identityHashCode(LocalView.current)
+    LaunchedEffect(hostViewId) {
+        liquidBoundaryState.hostViewIdentity = hostViewId
+    }
 
     CompositionLocalProvider(
         LocalOrbRevealState provides orbRevealState,
@@ -3867,6 +4590,7 @@ fun ExpenseTrackerApp(
                 val railShape = RoundedCornerShape(28.dp)
                 NavigationRail(
                     containerColor = Color.Transparent,
+                    contentColor = Color.White,
                     modifier = Modifier
                         .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Start + WindowInsetsSides.Vertical))
                         .padding(start = 10.dp, top = 10.dp, bottom = 10.dp)
@@ -3926,7 +4650,21 @@ fun ExpenseTrackerApp(
                                 onNavigateToWhatIf = {
                                     val whatIfIdx = activeSections.indexOf(AppSection.WHAT_IF)
                                     navigateToTab(whatIfIdx)
-                                }
+                                },
+                                prop1Items = prop1Items,
+                                prop2Items = prop2Items,
+                                onAddPerson1 = onAddPerson1Callback,
+                                onEditPerson1 = onEditPerson1Callback,
+                                onDeletePerson1 = onDeletePerson1Callback,
+                                onAddPerson2 = onAddPerson2Callback,
+                                onEditPerson2 = onEditPerson2Callback,
+                                onDeletePerson2 = onDeletePerson2Callback,
+                                onAddProp1 = onAddProp1Callback,
+                                onEditProp1 = onEditProp1Callback,
+                                onDeleteProp1 = onDeleteProp1Callback,
+                                onAddProp2 = onAddProp2Callback,
+                                onEditProp2 = onEditProp2Callback,
+                                onDeleteProp2 = onDeleteProp2Callback
                             )
                             AppSection.CASH_FLOW -> MoneyPlanScreen(
                                 appConfig = appConfig,
@@ -4121,42 +4859,8 @@ fun ExpenseTrackerApp(
                                 sharesList = sharesList,
                                 superAccountsList = superAccountsList,
                                 isWealthHidden = isWealthHidden,
-                                onAddShare = { code, owner, units, pPrice, cPrice, purchaseDate ->
-                                    val upperCode = code.trim().uppercase()
-                                    val newParcel = ShareParcel(
-                                        id = "sp_${System.currentTimeMillis()}",
-                                        code = upperCode,
-                                        owner = owner,
-                                        units = units,
-                                        purchasePrice = pPrice,
-                                        currentPrice = cPrice,
-                                        purchaseDate = purchaseDate.ifBlank { LocalDate.now().toString() }
-                                    )
-                                    val updated = sharesList.map {
-                                        if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) it.copy(currentPrice = cPrice) else it
-                                    } + newParcel
-                                    saveSharesList(updated)
-                                },
-                                onEditShare = { id, code, owner, units, pPrice, cPrice, purchaseDate ->
-                                    val upperCode = code.trim().uppercase()
-                                    val updated = sharesList.map {
-                                        if (it.id == id) {
-                                            it.copy(
-                                                code = upperCode,
-                                                owner = owner,
-                                                units = units,
-                                                purchasePrice = pPrice,
-                                                currentPrice = cPrice,
-                                                purchaseDate = purchaseDate
-                                            )
-                                        } else if (it.code.equals(upperCode, ignoreCase = true) && cPrice > 0) {
-                                            it.copy(currentPrice = cPrice)
-                                        } else {
-                                            it
-                                        }
-                                    }
-                                    saveSharesList(updated)
-                                },
+                                onAddShare = onAddShareCallback,
+                                onEditShare = onEditShareCallback,
                                 onDeleteShare = { id ->
                                     val updated = sharesList.filterNot { it.id == id }
                                     saveSharesList(updated)
@@ -4328,7 +5032,21 @@ fun ExpenseTrackerApp(
                             person2Savings = person2Savings,
                             isWealthHidden = isWealthHidden,
                             onNavigateToSettings = navigateToSettingsTab,
-                            onNavigateToWhatIf = navigateToWhatIfTab
+                            onNavigateToWhatIf = navigateToWhatIfTab,
+                            prop1Items = prop1Items,
+                            prop2Items = prop2Items,
+                            onAddPerson1 = onAddPerson1Callback,
+                            onEditPerson1 = onEditPerson1Callback,
+                            onDeletePerson1 = onDeletePerson1Callback,
+                            onAddPerson2 = onAddPerson2Callback,
+                            onEditPerson2 = onEditPerson2Callback,
+                            onDeletePerson2 = onDeletePerson2Callback,
+                            onAddProp1 = onAddProp1Callback,
+                            onEditProp1 = onEditProp1Callback,
+                            onDeleteProp1 = onDeleteProp1Callback,
+                            onAddProp2 = onAddProp2Callback,
+                            onEditProp2 = onEditProp2Callback,
+                            onDeleteProp2 = onDeleteProp2Callback
                         )
                         AppSection.CASH_FLOW -> MoneyPlanScreen(
                             appConfig = appConfig,
@@ -4515,6 +5233,7 @@ fun ExpenseTrackerApp(
                             ),
                         shape = dockShape,
                         color = Color.Transparent,
+                        contentColor = Color.White,
                         tonalElevation = 0.dp
                     ) {
                         Row(
@@ -5239,7 +5958,7 @@ fun OnboardingSetupScreen(
                                 label = { Text("Share Ticker (e.g. CBA)") },
                                 leadingIcon = {
                                     Box(modifier = Modifier.padding(start = 6.dp), contentAlignment = Alignment.Center) {
-                                        AsxShareLogoBadge(ticker = share.code, size = 18.dp)
+                                        AsxShareLogoBadge(ticker = share.code, size = 18.dp, market = share.market)
                                     }
                                 },
                                 singleLine = true,
@@ -5841,6 +6560,7 @@ fun SettingsScreen(
     onJoinHousehold: (String, (Boolean, String) -> Unit) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
+    val locale = currentLocale()
     val auth = remember { FirebaseAuth.getInstance() }
     val user = auth.currentUser
     var showEditProfileDialog by remember { mutableStateOf(false) }
@@ -5993,7 +6713,7 @@ fun SettingsScreen(
                             }
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text("Interest Rate", fontSize = 11.sp, color = SlateGray)
-                                Text("${String.format(Locale.getDefault(), "%.2f", prop1Loan.interestRatePa)}% p.a.", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
+                                Text("${String.format(locale, "%.2f", prop1Loan.interestRatePa)}% p.a.", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = BrandCoralPink)
                             }
                             Column(horizontalAlignment = Alignment.End) {
                                 Text("Offset Balance", fontSize = 11.sp, color = SlateGray)
@@ -6187,7 +6907,14 @@ fun SettingsScreen(
                     HorizontalDivider()
 
                     val subAuditPrefs = remember { context.getSharedPreferences("coinlens_sub_audit_v1", Context.MODE_PRIVATE) }
-                    var keptSubCount by remember { mutableIntStateOf(subAuditPrefs.getStringSet("kept_merchants", emptySet())?.size ?: 0) }
+                    var auditedSubCount by remember {
+                        mutableIntStateOf(
+                            (subAuditPrefs.getStringSet("kept_merchants", emptySet())?.size ?: 0) +
+                                (subAuditPrefs.getStringSet("cancel_merchants", emptySet())?.size ?: 0) +
+                                (subAuditPrefs.getStringSet("negotiate_merchants", emptySet())?.size ?: 0)
+                        )
+                    }
+                    var reclaimedSubTotal by remember { mutableDoubleStateOf(subAuditPrefs.getFloat("reclaimed_annual_total", 0f).toDouble()) }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -6197,15 +6924,26 @@ fun SettingsScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Subscription Audit Whitelist", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                             Text(
-                                if (keptSubCount > 0) "$keptSubCount recurring subscription(s) kept" else "No subscriptions audited yet",
+                                when {
+                                    auditedSubCount > 0 && reclaimedSubTotal > 0 -> "$auditedSubCount audited • ${formatCurrency(reclaimedSubTotal, 0)}/yr reclaimed"
+                                    auditedSubCount > 0 -> "$auditedSubCount recurring subscription(s) audited"
+                                    reclaimedSubTotal > 0 -> "${formatCurrency(reclaimedSubTotal, 0)}/yr reclaimed savings"
+                                    else -> "No subscriptions audited yet"
+                                },
                                 fontSize = 12.sp,
                                 color = SlateGray
                             )
                         }
-                        if (keptSubCount > 0) {
+                        if (auditedSubCount > 0 || reclaimedSubTotal > 0) {
                             TextButton(onClick = {
-                                subAuditPrefs.edit { clear() }
-                                keptSubCount = 0
+                                subAuditPrefs.edit {
+                                    remove("kept_merchants")
+                                    remove("cancel_merchants")
+                                    remove("negotiate_merchants")
+                                    remove("reclaimed_annual_total")
+                                }
+                                auditedSubCount = 0
+                                reclaimedSubTotal = 0.0
                             }) {
                                 Text("Reset Audit", color = BrandCoralPink, fontWeight = FontWeight.Bold)
                             }
@@ -6827,9 +7565,12 @@ fun MoneyPlanScreen(
         verticalArrangement = Arrangement.spacedBy(orbSpacing)
     ) {
         item {
+            val isDarkCard = LocalIsDarkTheme.current
             Card(
                 shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isDarkCard) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth().padding(18.dp)) {
@@ -6855,7 +7596,7 @@ fun MoneyPlanScreen(
                             )
                         }
                         Surface(
-                            color = Color.White.copy(alpha = 0.1f),
+                            color = if (isDarkCard) Color.White.copy(alpha = 0.1f) else Color(0xFFF1F5F9),
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Row(
@@ -7249,6 +7990,7 @@ fun PersonSummaryPill(
     isWealthHidden: Boolean = false,
     onClick: () -> Unit
 ) {
+    val isDark = LocalIsDarkTheme.current
     val isPositive = surplus >= 0
     val arrowIcon = if (isPositive) Icons.Default.NorthEast else Icons.Default.SouthEast
 
@@ -7256,8 +7998,8 @@ fun PersonSummaryPill(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
             .clickable { onClick() },
-        color = if (isSelected) accent else Color.White.copy(alpha = 0.08f),
-        border = BorderStroke(1.5.dp, if (isSelected) Color.White else accent.copy(alpha = 0.5f)),
+        color = if (isSelected) accent else if (isDark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.94f),
+        border = BorderStroke(1.5.dp, if (isSelected) (if (isDark) Color.White else BrandForestDark) else accent.copy(alpha = 0.6f)),
         shape = RoundedCornerShape(14.dp)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -7877,6 +8619,7 @@ fun LoansAndOffsetScreen(
     onUpdateProp2: (LoanConfig) -> Unit,
     topPadding: Dp = 115.dp
 ) {
+    val locale = currentLocale()
     var selectedLoanIndex by remember { mutableIntStateOf(0) }
     LaunchedEffect(appConfig.hasSecondProperty) {
         if (!appConfig.hasSecondProperty) selectedLoanIndex = 0
@@ -7948,9 +8691,12 @@ fun LoansAndOffsetScreen(
         }
 
         item {
+            val isDarkLoanHero = LocalIsDarkTheme.current
             Card(
                 shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isDarkLoanHero) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
             ) {
                 Column(modifier = Modifier.fillMaxWidth().padding(18.dp)) {
@@ -7984,12 +8730,12 @@ fun LoansAndOffsetScreen(
                         ) {
                             Icon(Icons.Default.Edit, contentDescription = null, tint = BrandForestDark, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("${String.format(Locale.getDefault(), "%.2f", activeLoan.interestRatePa)}%", color = BrandForestDark, fontWeight = FontWeight.ExtraBold)
+                            Text("${String.format(locale, "%.2f", activeLoan.interestRatePa)}%", color = BrandForestDark, fontWeight = FontWeight.ExtraBold)
                         }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+                    HorizontalDivider(color = if (isDarkLoanHero) Color.White.copy(alpha = 0.12f) else Color(0xFFCBD5E1))
                     Spacer(modifier = Modifier.height(12.dp))
 
                     Row(
@@ -8010,7 +8756,9 @@ fun LoansAndOffsetScreen(
                             FilledIconButton(
                                 onClick = { if (simulatedFortnight > 0) simulatedFortnight-- },
                                 modifier = Modifier.size(34.dp),
-                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.White.copy(alpha = 0.15f))
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = if (isDarkLoanHero) Color.White.copy(alpha = 0.15f) else Color(0xFFE2E8F0)
+                                )
                             ) {
                                 Icon(Icons.Default.Remove, contentDescription = "Prev Fortnight", tint = Color.White)
                             }
@@ -8059,16 +8807,16 @@ fun LoansAndOffsetScreen(
                     LoanDetailRow("Offset Account Balance", maskVal(activeLoan.offsetBalance, 0), highlightColor = BrandMintGreen)
                     LoanDetailRow("Net Balance Charging Interest", maskVal(netBalanceChargingInterest, 0))
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-                    LoanDetailRow("Standard Interest Rate", "${String.format(Locale.getDefault(), "%.2f", activeLoan.interestRatePa)}% p.a.")
-                    LoanDetailRow("Effective Rate With Offset", "${String.format(Locale.getDefault(), "%.2f", effectiveRate)}% p.a.", highlightColor = BrandMintGreen)
+                    LoanDetailRow("Standard Interest Rate", "${String.format(locale, "%.2f", activeLoan.interestRatePa)}% p.a.")
+                    LoanDetailRow("Effective Rate With Offset", "${String.format(locale, "%.2f", effectiveRate)}% p.a.", highlightColor = BrandMintGreen)
                     LoanDetailRow("Calculated Fortnightly Repayment", maskVal(fnPmt, 0))
                     LoanDetailRow("Calculated Weekly Repayment", maskVal(wkPmt, 2))
                     HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                     LoanDetailRow("Interest Saved (Per Fortnight)", maskVal(fortnightlyOffsetSavings, 2), highlightColor = BrandMintGreen)
                     LoanDetailRow("Interest Saved (Per Month)", maskVal(monthlyOffsetSavings, 2), highlightColor = BrandMintGreen)
                     LoanDetailRow("Interest Saved (Per Year)", maskVal(annualOffsetSavings, 0), highlightColor = BrandMintGreen)
-                    LoanDetailRow("Estimated Payoff Time Left", "${String.format(Locale.getDefault(), "%.1f", actualPayoffYearsLeft)} Years")
-                    LoanDetailRow("Years Saved By Offset & Advance", "${String.format(Locale.getDefault(), "%.2f", yearsSaved)} Years Saved", highlightColor = BrandCoralPink)
+                    LoanDetailRow("Estimated Payoff Time Left", "${String.format(locale, "%.1f", actualPayoffYearsLeft)} Years")
+                    LoanDetailRow("Years Saved By Offset & Advance", "${String.format(locale, "%.2f", yearsSaved)} Years Saved", highlightColor = BrandCoralPink)
                 }
             }
         }
@@ -8121,7 +8869,9 @@ fun LoansAndOffsetScreen(
         item {
             Card(
                 shape = RoundedCornerShape(10.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                colors = CardDefaults.cardColors(
+                    containerColor = if (LocalIsDarkTheme.current) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                )
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
@@ -8299,17 +9049,18 @@ fun WhatIfScenarioScreen(
 
     var activeScenarioId by rememberSaveable { mutableStateOf("status_quo") }
 
+    val locale = currentLocale()
     val isTenantMode = appConfig.isProperty1Rented
 
     // Baseline Financial Calculations (matching Total Wealth & Cash Flow tabs)
     val totalPropertyVal = if (appConfig.showProperties && !isTenantMode) {
-        prop1MarketValue + (if (appConfig.hasSecondProperty) prop2MarketValue else 0.0)
+        prop1MarketValue + (if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) prop2MarketValue else 0.0)
     } else 0.0
     val totalSuperVal = if (appConfig.showSuperAndShares) superAccountsList.sumOf { it.balance } else 0.0
     val totalSharesVal = if (appConfig.showSuperAndShares) sharesList.sumOf { it.units * it.currentPrice } else 0.0
     val totalOtherAssetsVal = if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
     val totalOffsets = if (appConfig.showLoans && !isTenantMode) {
-        prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0)
+        prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) prop2Loan.offsetBalance else 0.0)
     } else 0.0
     val totalCashSavings = if (isTenantMode) {
         person1Savings + (if (appConfig.isCoupleMode) person2Savings else 0.0)
@@ -8325,7 +9076,7 @@ fun WhatIfScenarioScreen(
     val p2AutoFortnights = getElapsedFortnightsSinceStart(prop2Loan.startDateStr)
     val p2Schedule = remember(prop2Loan) { generateAmortizationSchedule(prop2Loan, 780) }
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, p2Schedule.size - 1)) ?: p2Schedule.first()
-    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !isTenantMode) p2CurrentRow.closingBalance else 0.0
+    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !isTenantMode && !appConfig.isProperty2Rented) p2CurrentRow.closingBalance else 0.0
 
     val totalLiabilities = p1LiveBalance + p2LiveBalance
     val baseNetWorth = totalAssets - totalLiabilities
@@ -8368,8 +9119,8 @@ fun WhatIfScenarioScreen(
 
     val proj = remember(
         baseNetWorth, baseSurplusWeekly, horizonYears,
-        totalSharesVal, totalSuperVal, totalPropertyVal, totalOtherAssetsVal, totalOffsets, totalLiabilities,
-        appConfig.showLoans, appConfig.hasSecondProperty, isTenantMode, prop1Loan, prop2Loan,
+        totalSharesVal, totalSuperVal, totalPropertyVal, totalOtherAssetsVal, totalOffsets, totalCashSavings, totalLiabilities,
+        appConfig.showLoans, appConfig.hasSecondProperty, isTenantMode, appConfig.isProperty2Rented, prop1Loan, prop2Loan, p1LiveBalance, p2LiveBalance,
         lifestyleAdjustmentWeekly, effectiveIncomeGrowthWeekly, rateShockProp1, rateShockProp2, effectiveRentalCashflowDelta, superBoostWeekly,
         milestoneFingerprint, customLeversFingerprint
     ) {
@@ -8392,7 +9143,10 @@ fun WhatIfScenarioScreen(
             rentalIncomeGrowthWeekly = effectiveRentalCashflowDelta,
             superBoostWeekly = superBoostWeekly,
             customLevers = customLevers.toList(),
-            milestones = milestoneList.toList()
+            milestones = milestoneList.toList(),
+            prop1LiveBalance = p1LiveBalance,
+            prop2LiveBalance = p2LiveBalance,
+            isProperty2Rented = appConfig.isProperty2Rented
         )
     }
 
@@ -8407,9 +9161,9 @@ fun WhatIfScenarioScreen(
     val endPathBNetWorth = pathBSeries.lastOrNull() ?: baseNetWorth
     val netWorthDifference = endPathBNetWorth - endPathANetWorth
 
-    val year1MilestoneWeekly = milestoneList.filter { it.isEnabled && it.startYear <= 1 }.sumOf { it.weeklyCashflowImpact }
+    val year1MilestoneWeekly = milestoneList.filter { it.isEnabled && 1 >= it.startYear && 1 < it.startYear + it.durationYears }.sumOf { it.weeklyCashflowImpact }
     val weeklyCashflowDeltaNow =
-        lifestyleAdjustmentWeekly.toDouble() + effectiveIncomeGrowthWeekly.toDouble() - totalWeeklyRateShockCost + effectiveRentalCashflowDelta.toDouble() + proj.customWeeklyCashflowTotal + year1MilestoneWeekly
+        lifestyleAdjustmentWeekly.toDouble() + effectiveIncomeGrowthWeekly.toDouble() - totalWeeklyRateShockCost + effectiveRentalCashflowDelta.toDouble() - (superBoostWeekly.toDouble() * 0.68) + proj.customWeeklyCashflowTotal + year1MilestoneWeekly
     val simulatedWeeklySurplusNow = baseSurplusWeekly + weeklyCashflowDeltaNow
 
     val hasAnyChanges = lifestyleAdjustmentWeekly != 0f ||
@@ -8975,7 +9729,9 @@ fun WhatIfScenarioScreen(
                         Card(
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(14.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (LocalIsDarkTheme.current) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface
+                            )
                         ) {
                             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text("STATUS QUO", fontSize = 10.sp, fontWeight = FontWeight.ExtraBold, color = SlateGray, maxLines = 1, softWrap = false)
@@ -9253,8 +10009,8 @@ fun WhatIfScenarioScreen(
                         // TENANT LEVER: SUPERANNUATION SALARY SACRIFICE BOOST
                         WhatIfInteractiveLeverCard(
                             title = "$leverIdx. Extra Super Salary Sacrifice",
-                            subtitle = if (superBoostWeekly == 0f) "Concessional Super / FHSS contributions compounding at 8% p.a."
-                            else "+${maskVal(superBoostWeekly * 52.0, 0)}/yr boosted into Super",
+                            subtitle = if (superBoostWeekly == 0f) "After 15% super tax (~32% take-home offset), compounding at 7.5% p.a."
+                            else "+${maskVal(superBoostWeekly * 0.85 * 52.0, 0)}/yr into Super (-${maskVal(superBoostWeekly * 0.68, 0)}/wk take-home)",
                             value = superBoostWeekly,
                             valueRange = 0f..600f,
                             stepSize = 25f,
@@ -9272,9 +10028,9 @@ fun WhatIfScenarioScreen(
                         WhatIfInteractiveLeverCard(
                             title = "${leverIdx++}. ${appConfig.property1Name} Interest Rate Δ",
                             subtitle = when {
-                                abs(weeklyMortgageDelta1) < 0.5 -> "${prop1Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate1)}% p.a."
-                                weeklyMortgageDelta1 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta1), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
-                                else -> "Costs -${maskVal(weeklyMortgageDelta1, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate1)}% p.a.)"
+                                abs(weeklyMortgageDelta1) < 0.5 -> "${prop1Loan.name}: ${String.format(locale, "%.2f", baseRate1)}% p.a."
+                                weeklyMortgageDelta1 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta1), 0)}/wk (${String.format(locale, "%.2f", shockedRate1)}% p.a.)"
+                                else -> "Costs -${maskVal(weeklyMortgageDelta1, 0)}/wk extra (${String.format(locale, "%.2f", shockedRate1)}% p.a.)"
                             },
                             value = rateShockProp1,
                             valueRange = -3.0f..4.0f,
@@ -9294,13 +10050,13 @@ fun WhatIfScenarioScreen(
                         // MORTGAGE HOLDER LEVER: PROPERTY 2 INTEREST RATE CHANGE (DEDICATED LEVER PER PROPERTY)
                         WhatIfInteractiveLeverCard(
                             title = "${leverIdx++}. ${if (appConfig.hasSecondProperty) appConfig.property2Name else "Property 2"} Interest Rate Δ",
-                            subtitle = if (!appConfig.hasSecondProperty) {
-                                "Enable 2nd property in Settings or test hypothetical 2nd property rate changes"
+                            subtitle = if (!appConfig.hasSecondProperty || appConfig.isProperty2Rented) {
+                                "Test hypothetical $500k 2nd property loan rate changes (${String.format(locale, "%.2f", shockedRate2)}% p.a.)"
                             } else {
                                 when {
-                                    abs(weeklyMortgageDelta2) < 0.5 -> "${prop2Loan.name}: ${String.format(Locale.getDefault(), "%.2f", baseRate2)}% p.a."
-                                    weeklyMortgageDelta2 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta2), 0)}/wk (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
-                                    else -> "Costs -${maskVal(weeklyMortgageDelta2, 0)}/wk extra (${String.format(Locale.getDefault(), "%.2f", shockedRate2)}% p.a.)"
+                                    abs(weeklyMortgageDelta2) < 0.5 -> "${prop2Loan.name}: ${String.format(locale, "%.2f", baseRate2)}% p.a."
+                                    weeklyMortgageDelta2 < 0 -> "Saves +${maskVal(abs(weeklyMortgageDelta2), 0)}/wk (${String.format(locale, "%.2f", shockedRate2)}% p.a.)"
+                                    else -> "Costs -${maskVal(weeklyMortgageDelta2, 0)}/wk extra (${String.format(locale, "%.2f", shockedRate2)}% p.a.)"
                                 }
                             },
                             value = rateShockProp2,
@@ -9321,8 +10077,8 @@ fun WhatIfScenarioScreen(
                         // MORTGAGE HOLDER LEVER: SUPERANNUATION SALARY SACRIFICE BOOST
                         WhatIfInteractiveLeverCard(
                             title = "${leverIdx++}. Extra Super Salary Sacrifice",
-                            subtitle = if (superBoostWeekly == 0f) "Concessional Super contributions compounding at 8% p.a."
-                            else "+${maskVal(superBoostWeekly * 52.0, 0)}/yr boosted into Super",
+                            subtitle = if (superBoostWeekly == 0f) "After 15% super tax (~32% take-home offset), compounding at 7.5% p.a."
+                            else "+${maskVal(superBoostWeekly * 0.85 * 52.0, 0)}/yr into Super (-${maskVal(superBoostWeekly * 0.68, 0)}/wk take-home)",
                             value = superBoostWeekly,
                             valueRange = 0f..600f,
                             stepSize = 25f,
@@ -9371,7 +10127,7 @@ fun WhatIfScenarioScreen(
                             val q1 = cLever.minValue + span * 0.25f
                             val q3 = cLever.minValue + span * 0.75f
                             fun fmtPreset(v: Float): String = if (isRateType) {
-                                "${if (v > 0f) "+" else ""}${String.format(Locale.getDefault(), "%.2f", v)}%"
+                                "${if (v > 0f) "+" else ""}${String.format(locale, "%.2f", v)}%"
                             } else {
                                 "${if (v > 0f) "+" else if (v < 0f) "-" else ""}$${abs(v.roundToInt())}"
                             }
@@ -10014,10 +10770,10 @@ fun WhatIfScenarioScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("• Property Growth: Assumes 4% average annual capital growth.")
                     Text("• Shares & Super: Assumes 7.5% annual average market return.")
-                    Text("• Cash & Savings: In Tenant / Renter mode, cash savings earn ~4.5% p.a. HISA interest. In Home Owner mode, cash sits in a mortgage offset account (saving mortgage interest rather than earning cash interest).")
-                    Text("• Wage & Rental Inflation: Automatically compounds wages and rental income by ~3% average annual growth.")
-                    Text("• Debt Paydown: Assumes standard amortisation paying down ~3.5% of remaining debt principal annually.")
-                    Text("• Status Quo vs What-If: Status Quo projects your current trajectory with baseline assumptions, while What-If layers in your custom levers, wage growth, rate shocks, and milestones.")
+                    Text("• Offset & Cash Savings: In Home Owner mode, liquid cash sits in your mortgage offset account—reducing loan interest at your loan rate and paying down principal faster. Any cash above loan balances (and all cash in Tenant mode) earns ~4.5% p.a. HISA.")
+                    Text("• Super Salary Sacrifice: Deducts estimated ~32% marginal take-home impact from cashflow and credits 85% (after 15% super tax) into Super compounding at 7.5% p.a.")
+                    Text("• Wage & Rental Inflation: Compounds non-mortgage cashflow by ~3% p.a., while P&I mortgage repayments stay fixed in nominal dollars until paid off.")
+                    Text("• Status Quo vs What-If: Status Quo projects your current baseline with identical loan & offset mechanics, while What-If layers in your levers, rate shocks, and life milestones (including cash deposits & purchases).")
                 }
             },
             confirmButton = {
@@ -10162,10 +10918,11 @@ private fun WhatIfInteractiveLeverCard(
     onReset: (() -> Unit)? = null,
     onValueChange: (Float) -> Unit
 ) {
+    val locale = currentLocale()
     var showNumberEntry by remember { mutableStateOf(false) }
-    var typedValueText by remember(value, showNumberEntry) {
+    var typedValueText by remember(value, showNumberEntry, locale) {
         mutableStateOf(
-            if (isPercentage) String.format(Locale.getDefault(), "%.2f", value)
+            if (isPercentage) String.format(locale, "%.2f", value)
             else value.roundToInt().toString()
         )
     }
@@ -10182,7 +10939,7 @@ private fun WhatIfInteractiveLeverCard(
 
     fun resetLever() {
         onReset?.invoke() ?: onValueChange(defaultValue)
-        typedValueText = if (isPercentage) String.format(Locale.getDefault(), "%.2f", defaultValue)
+        typedValueText = if (isPercentage) String.format(locale, "%.2f", defaultValue)
         else defaultValue.roundToInt().toString()
         showNumberEntry = false
     }
@@ -10190,8 +10947,8 @@ private fun WhatIfInteractiveLeverCard(
     val formattedBadge = if (isPercentage) {
         when {
             abs(value) < 0.005f -> "0.00%"
-            value > 0f -> "+${String.format(Locale.getDefault(), "%.2f", value)}%"
-            else -> "${String.format(Locale.getDefault(), "%.2f", value)}%"
+            value > 0f -> "+${String.format(locale, "%.2f", value)}%"
+            else -> "${String.format(locale, "%.2f", value)}%"
         }
     } else {
         val rounded = value.roundToInt()
@@ -11002,8 +11759,23 @@ fun TotalWealthScreen(
     person2Savings: Double = 0.0,
     isWealthHidden: Boolean,
     onNavigateToSettings: () -> Unit,
-    onNavigateToWhatIf: () -> Unit = {}
+    onNavigateToWhatIf: () -> Unit = {},
+    prop1Items: List<CashflowItem> = emptyList(),
+    prop2Items: List<CashflowItem> = emptyList(),
+    onAddPerson1: (String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _ -> },
+    onEditPerson1: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _, _ -> },
+    onDeletePerson1: (String) -> Unit = {},
+    onAddPerson2: (String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _ -> },
+    onEditPerson2: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _, _ -> },
+    onDeletePerson2: (String) -> Unit = {},
+    onAddProp1: (String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _ -> },
+    onEditProp1: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _, _ -> },
+    onDeleteProp1: (String) -> Unit = {},
+    onAddProp2: (String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _ -> },
+    onEditProp2: (String, String, Double, String, BillingCycle, Long?, String?) -> Unit = { _, _, _, _, _, _, _ -> },
+    onDeleteProp2: (String) -> Unit = {}
 ) {
+    val locale = currentLocale()
     fun maskVal(valAmt: Double, decimals: Int = 0): String {
         return if (isWealthHidden) "$ ••••••" else formatCurrency(valAmt, decimals)
     }
@@ -11013,34 +11785,223 @@ fun TotalWealthScreen(
     var keptSubscriptions by remember {
         mutableStateOf(subAuditPrefs.getStringSet("kept_merchants", emptySet())?.toSet() ?: emptySet())
     }
+    var cancelTargetSubscriptions by remember {
+        mutableStateOf(subAuditPrefs.getStringSet("cancel_merchants", emptySet())?.toSet() ?: emptySet())
+    }
+    var negotiateTargetSubscriptions by remember {
+        mutableStateOf(subAuditPrefs.getStringSet("negotiate_merchants", emptySet())?.toSet() ?: emptySet())
+    }
+    var reclaimedAnnualTotal by remember {
+        mutableDoubleStateOf(subAuditPrefs.getFloat("reclaimed_annual_total", 0f).toDouble())
+    }
     var subscriptionLeaks by remember { mutableStateOf<List<SubscriptionLeak>>(emptyList()) }
     var isScanningLeaks by remember { mutableStateOf(false) }
+    var showSubCommandCenterDialog by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
-    fun markSubscriptionKept(merchant: String) {
-        val clean = merchant.trim().lowercase()
-        val updated = keptSubscriptions + clean
-        keptSubscriptions = updated
-        subAuditPrefs.edit { putStringSet("kept_merchants", updated) }
-        subscriptionLeaks = subscriptionLeaks.filter { it.merchant.trim().lowercase() != clean }
+    val person1Color = Color(appConfig.person1ColorHex)
+    val person2Color = Color(appConfig.person2ColorHex)
+
+    val allRecurringEntries = remember(person1Items, person2Items, prop1Items, prop2Items, appConfig) {
+        buildList {
+            person1Items.filter { it.weeklyAmount < 0 }.forEach { item ->
+                val (isSub, catTag) = classifyRecurringCategory(item.name, item.iconName)
+                add(
+                    TrackedRecurringEntry(
+                        item = item,
+                        sourceKey = "person1",
+                        ownerLabel = appConfig.person1Name,
+                        ownerColor = person1Color,
+                        isDetectedSubscription = isSub,
+                        categoryTag = catTag
+                    )
+                )
+            }
+            if (appConfig.isCoupleMode) {
+                person2Items.filter { it.weeklyAmount < 0 }.forEach { item ->
+                    val (isSub, catTag) = classifyRecurringCategory(item.name, item.iconName)
+                    add(
+                        TrackedRecurringEntry(
+                            item = item,
+                            sourceKey = "person2",
+                            ownerLabel = appConfig.person2Name,
+                            ownerColor = person2Color,
+                            isDetectedSubscription = isSub,
+                            categoryTag = catTag
+                        )
+                    )
+                }
+            }
+            if (appConfig.showProperties) {
+                prop1Items.filter { it.weeklyAmount < 0 }.forEach { item ->
+                    val (isSub, catTag) = classifyRecurringCategory(item.name, item.iconName)
+                    add(
+                        TrackedRecurringEntry(
+                            item = item,
+                            sourceKey = "prop1",
+                            ownerLabel = appConfig.property1Name,
+                            ownerColor = BrandCoralPink,
+                            isDetectedSubscription = isSub,
+                            categoryTag = catTag
+                        )
+                    )
+                }
+                if (appConfig.hasSecondProperty) {
+                    prop2Items.filter { it.weeklyAmount < 0 }.forEach { item ->
+                        val (isSub, catTag) = classifyRecurringCategory(item.name, item.iconName)
+                        add(
+                            TrackedRecurringEntry(
+                                item = item,
+                                sourceKey = "prop2",
+                                ownerLabel = appConfig.property2Name,
+                                ownerColor = BrandWarmAmber,
+                                isDetectedSubscription = isSub,
+                                categoryTag = catTag
+                            )
+                        )
+                    }
+                }
+            }
+        }
     }
 
-    fun markAllSubscriptionsKept() {
-        val updated = keptSubscriptions + subscriptionLeaks.map { it.merchant.trim().lowercase() }.toSet()
-        keptSubscriptions = updated
-        subAuditPrefs.edit { putStringSet("kept_merchants", updated) }
-        subscriptionLeaks = emptyList()
+    fun setSubscriptionAuditStatus(merchant: String, status: String) {
+        val clean = merchant.trim().lowercase()
+        val nextKept = (keptSubscriptions - clean).let { if (status == "KEPT") it + clean else it }
+        val nextCancel = (cancelTargetSubscriptions - clean).let { if (status == "CANCEL") it + clean else it }
+        val nextNegotiate = (negotiateTargetSubscriptions - clean).let { if (status == "NEGOTIATE") it + clean else it }
+        keptSubscriptions = nextKept
+        cancelTargetSubscriptions = nextCancel
+        negotiateTargetSubscriptions = nextNegotiate
+        subAuditPrefs.edit {
+            putStringSet("kept_merchants", nextKept)
+            putStringSet("cancel_merchants", nextCancel)
+            putStringSet("negotiate_merchants", nextNegotiate)
+        }
+        if (status != "NONE") {
+            subscriptionLeaks = subscriptionLeaks.filter { it.merchant.trim().lowercase() != clean }
+        }
+    }
+
+    fun resetAllAuditStatuses() {
+        keptSubscriptions = emptySet()
+        cancelTargetSubscriptions = emptySet()
+        negotiateTargetSubscriptions = emptySet()
+        subAuditPrefs.edit {
+            remove("kept_merchants")
+            remove("cancel_merchants")
+            remove("negotiate_merchants")
+        }
+    }
+
+    fun markAllSubscriptionsKept(merchants: List<String> = allRecurringEntries.map { it.item.name }) {
+        val cleanTargets = (merchants + subscriptionLeaks.map { it.merchant })
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toSet()
+        val nextKept = keptSubscriptions + cleanTargets
+        val nextCancel = cancelTargetSubscriptions - cleanTargets
+        val nextNegotiate = negotiateTargetSubscriptions - cleanTargets
+        keptSubscriptions = nextKept
+        cancelTargetSubscriptions = nextCancel
+        negotiateTargetSubscriptions = nextNegotiate
+        subAuditPrefs.edit {
+            putStringSet("kept_merchants", nextKept)
+            putStringSet("cancel_merchants", nextCancel)
+            putStringSet("negotiate_merchants", nextNegotiate)
+        }
+        subscriptionLeaks = subscriptionLeaks.filter { it.merchant.trim().lowercase() !in cleanTargets }
+    }
+
+    fun runAiLeakScan() {
+        if (isScanningLeaks) return
+        isScanningLeaks = true
+        coroutineScope.launch {
+            val allExpensesStr = allRecurringEntries.joinToString("; ") {
+                "${it.ownerLabel}: ${it.item.name} ($${String.format(Locale.US, "%.2f", abs(it.item.weeklyAmount))}/wk, ${it.item.billingCycle.label})"
+            }
+            val detected = AiAssistantManager.detectSubscriptionLeaks(allExpensesStr)
+            val currentKept = subAuditPrefs.getStringSet("kept_merchants", emptySet())?.toSet() ?: emptySet()
+            val currentCancel = subAuditPrefs.getStringSet("cancel_merchants", emptySet())?.toSet() ?: emptySet()
+            subscriptionLeaks = detected.filter {
+                val key = it.merchant.trim().lowercase()
+                key !in currentKept && key !in currentCancel
+            }
+            isScanningLeaks = false
+        }
+    }
+
+    fun handleAddSubscriptionItem(
+        sourceKey: String,
+        name: String,
+        weeklyAmt: Double,
+        iconName: String,
+        cycle: BillingCycle,
+        dueMillis: Long?
+    ) {
+        val signedAmt = -abs(weeklyAmt)
+        when (sourceKey) {
+            "person2" -> onAddPerson2(name, signedAmt, iconName, cycle, dueMillis, null)
+            "prop1" -> onAddProp1(name, signedAmt, iconName, cycle, dueMillis, null)
+            "prop2" -> onAddProp2(name, signedAmt, iconName, cycle, dueMillis, null)
+            else -> onAddPerson1(name, signedAmt, iconName, cycle, dueMillis, null)
+        }
+    }
+
+    fun handleEditRecurringEntry(
+        entry: TrackedRecurringEntry,
+        name: String,
+        weeklyAmt: Double,
+        iconName: String,
+        cycle: BillingCycle,
+        dueMillis: Long?
+    ) {
+        val signedAmt = -abs(weeklyAmt)
+        val assetId = entry.item.linkedAssetId
+        when (entry.sourceKey) {
+            "person2" -> onEditPerson2(entry.item.id, name, signedAmt, iconName, cycle, dueMillis, assetId)
+            "prop1" -> onEditProp1(entry.item.id, name, signedAmt, iconName, cycle, dueMillis, assetId)
+            "prop2" -> onEditProp2(entry.item.id, name, signedAmt, iconName, cycle, dueMillis, assetId)
+            else -> onEditPerson1(entry.item.id, name, signedAmt, iconName, cycle, dueMillis, assetId)
+        }
+    }
+
+    fun handleDeleteRecurringEntry(entry: TrackedRecurringEntry) {
+        when (entry.sourceKey) {
+            "person2" -> onDeletePerson2(entry.item.id)
+            "prop1" -> onDeleteProp1(entry.item.id)
+            "prop2" -> onDeleteProp2(entry.item.id)
+            else -> onDeletePerson1(entry.item.id)
+        }
+    }
+
+    fun handleReclaimCancelledEntry(entry: TrackedRecurringEntry) {
+        val annualSaved = abs(entry.item.weeklyAmount) * 52.0
+        val newTotal = reclaimedAnnualTotal + annualSaved
+        reclaimedAnnualTotal = newTotal
+        val clean = entry.item.name.trim().lowercase()
+        val nextCancel = cancelTargetSubscriptions - clean
+        val nextNegotiate = negotiateTargetSubscriptions - clean
+        cancelTargetSubscriptions = nextCancel
+        negotiateTargetSubscriptions = nextNegotiate
+        subAuditPrefs.edit {
+            putFloat("reclaimed_annual_total", newTotal.toFloat())
+            putStringSet("cancel_merchants", nextCancel)
+            putStringSet("negotiate_merchants", nextNegotiate)
+        }
+        subscriptionLeaks = subscriptionLeaks.filter { it.merchant.trim().lowercase() != clean }
+        handleDeleteRecurringEntry(entry)
     }
 
     val totalPropertyVal = if (appConfig.showProperties && !appConfig.isProperty1Rented) {
-        prop1MarketValue + (if (appConfig.hasSecondProperty) prop2MarketValue else 0.0)
+        prop1MarketValue + (if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) prop2MarketValue else 0.0)
     } else 0.0
 
     val totalSuperVal = if (appConfig.showSuperAndShares) superAccountsList.sumOf { it.balance } else 0.0
     val totalSharesVal = if (appConfig.showSuperAndShares) sharesList.sumOf { it.units * it.currentPrice } else 0.0
     val totalOtherAssetsVal = if (appConfig.showOtherAssets) otherAssetsList.sumOf { it.value } else 0.0
     val totalOffsets = if (appConfig.showLoans && !appConfig.isProperty1Rented) {
-        prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty) prop2Loan.offsetBalance else 0.0)
+        prop1Loan.offsetBalance + (if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) prop2Loan.offsetBalance else 0.0)
     } else 0.0
     val totalCashSavings = if (appConfig.isProperty1Rented) {
         person1Savings + (if (appConfig.isCoupleMode) person2Savings else 0.0)
@@ -11058,7 +12019,7 @@ fun TotalWealthScreen(
         if (appConfig.hasSecondProperty) generateAmortizationSchedule(prop2Loan, 780) else emptyList()
     }
     val p2CurrentRow = p2Schedule.getOrNull(p2AutoFortnights.coerceIn(0, max(0, p2Schedule.size - 1)))
-    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !appConfig.isProperty1Rented) {
+    val p2LiveBalance = if (appConfig.showLoans && appConfig.hasSecondProperty && !appConfig.isProperty1Rented && !appConfig.isProperty2Rented) {
         p2CurrentRow?.closingBalance ?: 0.0
     } else 0.0
 
@@ -11097,7 +12058,7 @@ fun TotalWealthScreen(
                         if (appConfig.isCoupleMode) "COMBINED NET WEALTH" else "TOTAL NET WEALTH",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = Color.White,
+                        color = MaterialTheme.colorScheme.onSurface,
                         letterSpacing = 1.2.sp
                     )
                     Spacer(Modifier.height(6.dp))
@@ -11178,8 +12139,8 @@ fun TotalWealthScreen(
                                     Text(triple.first, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                                 }
                                 Text(
-                                    if (isWealthHidden) "•••••• (${String.format(Locale.getDefault(), "%.1f", pct)}%)"
-                                    else "${formatCurrency(triple.second, 0)} (${String.format(Locale.getDefault(), "%.1f", pct)}%)",
+                                    if (isWealthHidden) "•••••• (${String.format(locale, "%.1f", pct)}%)"
+                                    else "${formatCurrency(triple.second, 0)} (${String.format(locale, "%.1f", pct)}%)",
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -11190,155 +12151,21 @@ fun TotalWealthScreen(
             }
         }
 
-        // WASTED SPEND & SUBSCRIPTION AUDIT CARD (LOCATED BELOW ASSET ALLOCATION ORB)
+        // INTERACTIVE SUBSCRIPTION & LEAK AUDIT ORB
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
-            ) {
-                Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(Icons.Default.Security, contentDescription = null, tint = BrandCoralPink, modifier = Modifier.size(20.dp))
-                            Text(
-                                "Subscription & Leak Audit",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 15.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (subscriptionLeaks.size > 1) {
-                                Button(
-                                    onClick = { markAllSubscriptionsKept() },
-                                    colors = ButtonDefaults.buttonColors(containerColor = BrandMintGreen, contentColor = BrandForestDark),
-                                    shape = RoundedCornerShape(8.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Text("Keep All", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            IconButton(
-                                onClick = {
-                                    isScanningLeaks = true
-                                    coroutineScope.launch {
-                                        val allExpensesStr = (person1Items + person2Items).joinToString { "${it.name}: $${abs(it.weeklyAmount)}/wk" }
-                                        val detected = AiAssistantManager.detectSubscriptionLeaks(allExpensesStr)
-                                        val currentKept = subAuditPrefs.getStringSet("kept_merchants", emptySet())?.toSet() ?: emptySet()
-                                        subscriptionLeaks = detected.filter { it.merchant.trim().lowercase() !in currentKept }
-                                        isScanningLeaks = false
-                                    }
-                                },
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Icon(Icons.Default.Refresh, contentDescription = "Scan Leaks", tint = SlateGray, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
-
-                    if (isScanningLeaks) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = BrandCoralPink, strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text("AI scanning expenses for subscription leaks...", fontSize = 12.sp, color = SlateGray)
-                        }
-                    } else if (subscriptionLeaks.isEmpty()) {
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = BrandMintGreen.copy(alpha = 0.08f),
-                            border = BorderStroke(1.dp, BrandMintGreen.copy(alpha = 0.25f)),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = BrandMintGreen, modifier = Modifier.size(20.dp))
-                                Column {
-                                    Text(
-                                        "No unreviewed subscription leaks",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.sp,
-                                        color = BrandMintGreen
-                                    )
-                                    Text(
-                                        if (keptSubscriptions.isNotEmpty())
-                                            "${keptSubscriptions.size} recurring subscription(s) approved. Tap refresh to re-scan anytime."
-                                        else
-                                            "All recurring expenses reviewed. Tap refresh to scan for leaks.",
-                                        fontSize = 11.sp,
-                                        color = SlateGray
-                                    )
-                                }
-                            }
-                        }
-                    } else {
-                        Text(
-                            "Review detected recurring charges. Tap 'Stay Subscribed' to keep a subscription and it will never show up again.",
-                            fontSize = 12.sp,
-                            color = SlateGray
-                        )
-
-                        subscriptionLeaks.forEach { leak ->
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = BrandCoralPink.copy(alpha = 0.1f),
-                                border = BorderStroke(1.dp, BrandCoralPink.copy(alpha = 0.3f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                        Text(leak.merchant, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                        Text(
-                                            "Est. Annual Impact: ${formatCurrency(leak.annualImpact, 0)}/yr (${formatCurrency(leak.monthlyAmount, 2)}/mo)",
-                                            fontSize = 11.sp,
-                                            color = BrandCoralPink
-                                        )
-                                    }
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        IconButton(
-                                            onClick = {
-                                                subscriptionLeaks = subscriptionLeaks.filter { it.merchant.trim().lowercase() != leak.merchant.trim().lowercase() }
-                                            },
-                                            modifier = Modifier.size(28.dp)
-                                        ) {
-                                            Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = SlateGray, modifier = Modifier.size(16.dp))
-                                        }
-                                        Button(
-                                            onClick = { markSubscriptionKept(leak.merchant) },
-                                            colors = ButtonDefaults.buttonColors(containerColor = BrandMintGreen, contentColor = BrandForestDark),
-                                            shape = RoundedCornerShape(8.dp),
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                        ) {
-                                            Text("Stay Subscribed", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            SubscriptionAndLeakAuditOrbCard(
+                allRecurringEntries = allRecurringEntries,
+                subscriptionLeaks = subscriptionLeaks,
+                keptSubscriptions = keptSubscriptions,
+                cancelTargetSubscriptions = cancelTargetSubscriptions,
+                reclaimedAnnualTotal = reclaimedAnnualTotal,
+                isScanningLeaks = isScanningLeaks,
+                isWealthHidden = isWealthHidden,
+                onOpenCommandCenter = { showSubCommandCenterDialog = true },
+                onRunAiLeakScan = { runAiLeakScan() },
+                onMarkSubscriptionKept = { setSubscriptionAuditStatus(it, "KEPT") },
+                onFlagSubscriptionCancel = { setSubscriptionAuditStatus(it, "CANCEL") }
+            )
         }
 
         item {
@@ -11353,9 +12180,9 @@ fun TotalWealthScreen(
                         Icon(Icons.Default.NorthEast, contentDescription = null, tint = BrandMintGreen, modifier = Modifier.size(18.dp))
                         Text("Tracked Assets Breakdown", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = BrandMintGreen)
                     }
-                    if (appConfig.showProperties) {
+                    if (appConfig.showProperties && !appConfig.isProperty1Rented) {
                         LoanDetailRow("${appConfig.property1Name} (Est. Market)", maskVal(prop1MarketValue, 0))
-                        if (appConfig.hasSecondProperty) {
+                        if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) {
                             LoanDetailRow("${appConfig.property2Name} (Est. Market)", maskVal(prop2MarketValue, 0))
                         }
                     }
@@ -11366,9 +12193,9 @@ fun TotalWealthScreen(
                     if (appConfig.showOtherAssets) {
                         LoanDetailRow("Other Assets", maskVal(totalOtherAssetsVal, 0))
                     }
-                    if (appConfig.showLoans) {
+                    if (appConfig.showLoans && !appConfig.isProperty1Rented) {
                         LoanDetailRow("${appConfig.property1Name} Offset", maskVal(prop1Loan.offsetBalance, 0))
-                        if (appConfig.hasSecondProperty) {
+                        if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) {
                             LoanDetailRow("${appConfig.property2Name} Offset", maskVal(prop2Loan.offsetBalance, 0))
                         }
                     }
@@ -11379,7 +12206,7 @@ fun TotalWealthScreen(
             }
         }
 
-        if (appConfig.showLoans) {
+        if (appConfig.showLoans && !appConfig.isProperty1Rented) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -11393,7 +12220,7 @@ fun TotalWealthScreen(
                             Text("Liabilities Breakdown", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = BrandCoralPink)
                         }
                         LoanDetailRow("${appConfig.property1Name} Loan Balance", maskVal(p1LiveBalance, 0), highlightColor = BrandCoralPink)
-                        if (appConfig.hasSecondProperty) {
+                        if (appConfig.hasSecondProperty && !appConfig.isProperty2Rented) {
                             LoanDetailRow("${appConfig.property2Name} Loan Balance", maskVal(p2LiveBalance, 0), highlightColor = BrandCoralPink)
                         }
                     }
@@ -11401,13 +12228,201 @@ fun TotalWealthScreen(
             }
         }
     }
+
+    if (showSubCommandCenterDialog) {
+        SubscriptionAndLeakAuditCommandCenterDialog(
+            appConfig = appConfig,
+            allRecurringEntries = allRecurringEntries,
+            subscriptionLeaks = subscriptionLeaks,
+            keptSubscriptions = keptSubscriptions,
+            cancelTargetSubscriptions = cancelTargetSubscriptions,
+            reclaimedAnnualTotal = reclaimedAnnualTotal,
+            isScanningLeaks = isScanningLeaks,
+            isWealthHidden = isWealthHidden,
+            onRunAiScan = { runAiLeakScan() },
+            onSetSubscriptionStatus = { merchant, status -> setSubscriptionAuditStatus(merchant, status) },
+            onKeepAll = { merchants -> markAllSubscriptionsKept(merchants) },
+            onResetAuditStatuses = { resetAllAuditStatuses() },
+            onAddSubscriptionItem = { sourceKey, name, weeklyAmt, iconName, cycle, dueMillis ->
+                handleAddSubscriptionItem(sourceKey, name, weeklyAmt, iconName, cycle, dueMillis)
+            },
+            onEditRecurringEntry = { entry, name, weeklyAmt, iconName, cycle, dueMillis ->
+                handleEditRecurringEntry(entry, name, weeklyAmt, iconName, cycle, dueMillis)
+            },
+            onDeleteRecurringEntry = { entry -> handleDeleteRecurringEntry(entry) },
+            onReclaimCancelledEntry = { entry -> handleReclaimCancelledEntry(entry) },
+            onDismiss = { showSubCommandCenterDialog = false }
+        )
+    }
 }
 
 data class TimelinePoint(
     val label: String,
     val value: Double,
-    val dateText: String
+    val dateText: String,
+    val xFraction: Float = 0f,
+    val costBasisAtDate: Double = 0.0,
+    val addedTickers: List<String> = emptyList()
 )
+
+fun resolveParcelPurchaseDate(parcel: ShareParcel, fallbackDate: LocalDate = LocalDate.now()): LocalDate {
+    if (parcel.purchaseDate.isNotBlank()) {
+        parseFlexibleDate(parcel.purchaseDate)?.let { return it }
+    }
+    val match = Regex("""\d{10,13}""").find(parcel.id)
+    if (match != null) {
+        try {
+            val raw = match.value.toLong()
+            val millis = if (match.value.length <= 10) raw * 1000L else raw
+            return Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
+        } catch (_: Exception) {}
+    }
+    return fallbackDate
+}
+
+private data class ParcelTimelineEntry(
+    val code: String,
+    val buyDate: LocalDate,
+    val buyCost: Double,
+    val nowValue: Double
+)
+
+fun buildPurchaseAwareTimelinePoints(
+    shares: List<ShareParcel>,
+    timeframe: String
+): List<TimelinePoint> {
+    if (shares.isEmpty()) {
+        return listOf(
+            TimelinePoint(label = "Start", value = 0.0, dateText = "No holdings", xFraction = 0f),
+            TimelinePoint(label = "End", value = 0.0, dateText = "No holdings", xFraction = 1f)
+        )
+    }
+
+    val now = LocalDate.now()
+    val dtf = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
+    val entries = shares.map { parcel ->
+        val buyDate = resolveParcelPurchaseDate(parcel, now).coerceAtMost(now)
+        val unitBuyPrice = if (parcel.purchasePrice > 0.0) parcel.purchasePrice else parcel.currentPrice
+        ParcelTimelineEntry(
+            code = parcel.code.trim().uppercase(),
+            buyDate = buyDate,
+            buyCost = (parcel.units * unitBuyPrice).coerceAtLeast(0.0),
+            nowValue = (parcel.units * parcel.currentPrice).coerceAtLeast(0.0)
+        )
+    }
+
+    val earliestBuy = entries.minOf { it.buyDate }
+    val windowStart = when (timeframe) {
+        "1M" -> now.minusMonths(1)
+        "3M" -> now.minusMonths(3)
+        "6M" -> now.minusMonths(6)
+        "1Y" -> now.minusYears(1)
+        else -> if (earliestBuy.isBefore(now)) earliestBuy.minusDays(1) else now.minusDays(1)
+    }.let { candidate ->
+        if (candidate.isBefore(now)) candidate else now.minusDays(1)
+    }
+
+    val totalDays = ChronoUnit.DAYS.between(windowStart, now).coerceAtLeast(1L)
+    val gridSteps = 24
+    val candidateDates = sortedSetOf<LocalDate>()
+    candidateDates.add(windowStart)
+    candidateDates.add(now)
+    for (i in 1 until gridSteps) {
+        val offset = ((totalDays.toDouble() * i.toDouble()) / gridSteps.toDouble()).roundToInt().toLong().coerceIn(0L, totalDays)
+        candidateDates.add(windowStart.plusDays(offset))
+    }
+
+    val buysByDate = entries.groupBy { it.buyDate }
+    buysByDate.keys.forEach { buyDate ->
+        if (!buyDate.isBefore(windowStart) && !buyDate.isAfter(now)) {
+            candidateDates.add(buyDate)
+        }
+    }
+
+    fun evaluateAt(date: LocalDate, includeSameDayBuys: Boolean): Pair<Double, Double> {
+        var valSum = 0.0
+        var costSum = 0.0
+        for (e in entries) {
+            val isOwned = if (includeSameDayBuys) {
+                !e.buyDate.isAfter(date)
+            } else {
+                e.buyDate.isBefore(date)
+            }
+            if (!isOwned) continue
+
+            costSum += e.buyCost
+            val spanDays = ChronoUnit.DAYS.between(e.buyDate, now)
+            val parcelVal = when {
+                spanDays <= 0L || date == now -> e.nowValue
+                date == e.buyDate -> e.buyCost
+                else -> {
+                    val elapsed = ChronoUnit.DAYS.between(e.buyDate, date).coerceIn(0L, spanDays)
+                    val progress = elapsed.toDouble() / spanDays.toDouble()
+                    (e.buyCost + (e.nowValue - e.buyCost) * progress).coerceAtLeast(0.0)
+                }
+            }
+            valSum += parcelVal
+        }
+        return valSum to costSum
+    }
+
+    val points = mutableListOf<TimelinePoint>()
+    candidateDates.forEach { d ->
+        val xFrac = (ChronoUnit.DAYS.between(windowStart, d).toFloat() / totalDays.toFloat()).coerceIn(0f, 1f)
+        val dateLabel = d.format(dtf)
+        val dayBuys = buysByDate[d].orEmpty()
+
+        if (dayBuys.isNotEmpty() && d.isAfter(windowStart)) {
+            val (preVal, preCost) = evaluateAt(d, includeSameDayBuys = false)
+            points.add(
+                TimelinePoint(
+                    label = "",
+                    value = preVal,
+                    dateText = dateLabel,
+                    xFraction = xFrac,
+                    costBasisAtDate = preCost
+                )
+            )
+            val (postVal, postCost) = evaluateAt(d, includeSameDayBuys = true)
+            val tickerSummary = dayBuys
+                .groupBy { it.code }
+                .map { (ticker, list) -> if (list.size > 1) "+$ticker ×${list.size}" else "+$ticker" }
+            points.add(
+                TimelinePoint(
+                    label = if (d == now) "Today" else "",
+                    value = postVal,
+                    dateText = dateLabel,
+                    xFraction = xFrac,
+                    costBasisAtDate = postCost,
+                    addedTickers = tickerSummary
+                )
+            )
+        } else {
+            val (v, c) = evaluateAt(d, includeSameDayBuys = true)
+            val startBuys = if (d == windowStart && dayBuys.isNotEmpty()) {
+                dayBuys.groupBy { it.code }.map { (ticker, list) -> if (list.size > 1) "+$ticker ×${list.size}" else "+$ticker" }
+            } else {
+                emptyList()
+            }
+            points.add(
+                TimelinePoint(
+                    label = when (d) {
+                        windowStart -> "Start"
+                        now -> "Today"
+                        else -> ""
+                    },
+                    value = v,
+                    dateText = dateLabel,
+                    xFraction = xFrac,
+                    costBasisAtDate = c,
+                    addedTickers = startBuys
+                )
+            )
+        }
+    }
+
+    return points
+}
 
 @Composable
 fun SharesHoldingTimelineCard(
@@ -11417,71 +12432,35 @@ fun SharesHoldingTimelineCard(
     shares: List<ShareParcel>,
     isWealthHidden: Boolean
 ) {
-    var selectedTimeframe by remember { mutableStateOf("6M") }
+    val locale = currentLocale()
+    var selectedTimeframe by remember { mutableStateOf("ALL") }
     val timeframes = listOf("1M", "3M", "6M", "1Y", "ALL")
     var scrubbedIndex by remember { mutableStateOf<Int?>(null) }
 
-    val hasShares = shares.isNotEmpty() && totalValue > 0.0
+    val hasShares = shares.isNotEmpty()
 
     val points = remember(selectedTimeframe, totalValue, costBasis, shares) {
-        if (!hasShares) {
-            listOf(
-                TimelinePoint(label = "Start", value = 0.0, dateText = "No holdings"),
-                TimelinePoint(label = "End", value = 0.0, dateText = "No holdings")
-            )
-        } else {
-            val count = 25
-            val now = LocalDate.now()
-            val (daysBack, startValRatio) = when (selectedTimeframe) {
-                "1M" -> 30L to 0.08
-                "3M" -> 90L to 0.22
-                "6M" -> 180L to 0.45
-                "1Y" -> 365L to 0.75
-                else -> 730L to 1.00
-            }
-
-            val totalGain = totalValue - costBasis
-            val startVal = if (selectedTimeframe == "ALL") {
-                costBasis
-            } else {
-                (totalValue - totalGain * startValRatio).coerceAtLeast(costBasis * 0.5)
-            }
-
-            val startDate = now.minusDays(daysBack)
-            val dtf = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
-            val seed = shares.fold(42) { acc, p -> (acc * 31 + p.code.hashCode()) and 0x7FFFFFFF }
-
-            (0 until count).map { i ->
-                val progress = i / (count - 1).toFloat()
-                val linear = startVal + (totalValue - startVal) * progress
-                val wave1 = sin(progress * 3.8 * Math.PI + (seed % 7)) * 0.45
-                val wave2 = cos(progress * 6.2 * Math.PI + (seed % 11)) * 0.25
-                val noise = (wave1 + wave2) * (totalValue * 0.028) * (1f - progress)
-                
-                val valAtPoint = when (i) {
-                    count - 1 -> totalValue
-                    0 -> startVal
-                    else -> (linear + noise).coerceAtLeast(0.0)
-                }
-
-                val pointDate = startDate.plusDays(((daysBack * progress).toLong()).coerceIn(0L, daysBack))
-                TimelinePoint(
-                    label = if (i == 0) "Start" else if (i == count - 1) "Today" else "",
-                    value = valAtPoint,
-                    dateText = pointDate.format(dtf)
-                )
-            }
-        }
+        buildPurchaseAwareTimelinePoints(shares = shares, timeframe = selectedTimeframe)
     }
 
-    val activeIndex = scrubbedIndex ?: (points.size - 1)
-    val activePoint = points[activeIndex.coerceIn(0, points.lastIndex)]
+    val activeIndex = (scrubbedIndex ?: (points.size - 1)).coerceIn(0, points.lastIndex)
+    val activePoint = points[activeIndex]
     val displayValue = if (isWealthHidden) "$ ••••••" else formatCurrency(activePoint.value, 2)
-    val referenceStart = points.first().value
-    val periodGain = activePoint.value - referenceStart
-    val periodGainPct = if (referenceStart > 0) (periodGain / referenceStart) * 100 else 0.0
-    val isPositive = periodGain >= 0
+
+    val periodStartVal = points.first().value
+    val activeCostBasis = if (hasShares) activePoint.costBasisAtDate else 0.0
+    val periodValueGrowth = activePoint.value - periodStartVal
+    val periodGrowthPct = if (periodStartVal > 0.0) (periodValueGrowth / periodStartVal) * 100.0 else 0.0
+    val unrealisedGain = activePoint.value - activeCostBasis
+    val unrealisedPct = if (activeCostBasis > 0.0) (unrealisedGain / activeCostBasis) * 100.0 else 0.0
+
+    val usePeriodGrowth = periodStartVal > 0.0
+    val headlineDelta = if (usePeriodGrowth) periodValueGrowth else unrealisedGain
+    val headlinePct = if (usePeriodGrowth) periodGrowthPct else unrealisedPct
+    val isPositive = headlineDelta >= 0.0
     val trendColor = if (isPositive) BrandMintGreen else BrandCoralPink
+
+    val buyMarkersCount = remember(points) { points.count { it.addedTickers.isNotEmpty() } }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -11519,7 +12498,10 @@ fun SharesHoldingTimelineCard(
                     timeframes.forEach { tf ->
                         val isTfSelected = selectedTimeframe == tf
                         Surface(
-                            onClick = { selectedTimeframe = tf },
+                            onClick = {
+                                selectedTimeframe = tf
+                                scrubbedIndex = null
+                            },
                             shape = RoundedCornerShape(8.dp),
                             color = if (isTfSelected) trendColor.copy(alpha = 0.22f) else Color.Transparent,
                             border = if (isTfSelected) BorderStroke(1.dp, trendColor.copy(alpha = 0.5f)) else null
@@ -11544,7 +12526,7 @@ fun SharesHoldingTimelineCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Bottom
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
                         text = displayValue,
                         fontSize = 26.sp,
@@ -11562,10 +12544,16 @@ fun SharesHoldingTimelineCard(
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
-                            text = if (isWealthHidden) "$ •••••• (••••%)" else "${if (periodGain >= 0) "+" else ""}${formatCurrency(periodGain, 2)} (${String.format(Locale.getDefault(), "%.2f", periodGainPct)}%)",
+                            text = if (isWealthHidden) {
+                                "$ •••••• (••••%)"
+                            } else if (activeCostBasis <= 0.0 && activePoint.value <= 0.0) {
+                                "Not yet invested"
+                            } else {
+                                "${if (headlineDelta >= 0) "+" else ""}${formatCurrency(headlineDelta, 2)} (${String.format(locale, "%.2f", headlinePct)}%)"
+                            },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = trendColor
+                            color = if (activeCostBasis <= 0.0 && activePoint.value <= 0.0) SlateGray else trendColor
                         )
                         Text(
                             text = if (scrubbedIndex != null) "• ${activePoint.dateText}" else "• $selectedTimeframe",
@@ -11575,11 +12563,36 @@ fun SharesHoldingTimelineCard(
                     }
                 }
 
-                if (costBasis > 0 && !isWealthHidden) {
+                if (hasShares && !isWealthHidden) {
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("Cost Basis", fontSize = 10.sp, color = SlateGray)
-                        Text(formatCurrency(costBasis, 0), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SlateGray)
+                        Text(
+                            if (scrubbedIndex != null) "Invested Then" else "Cost Basis",
+                            fontSize = 10.sp,
+                            color = SlateGray
+                        )
+                        Text(
+                            formatCurrency(activeCostBasis, 0),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SlateGray
+                        )
                     }
+                }
+            }
+
+            if (activePoint.addedTickers.isNotEmpty() && !isWealthHidden) {
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = BrandSkyBlue.copy(alpha = 0.14f),
+                    border = BorderStroke(0.8.dp, BrandSkyBlue.copy(alpha = 0.35f))
+                ) {
+                    Text(
+                        text = "Buy on ${activePoint.dateText}: ${activePoint.addedTickers.joinToString(", ")}",
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        fontSize = 10.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BrandSkyBlue
+                    )
                 }
             }
 
@@ -11592,22 +12605,33 @@ fun SharesHoldingTimelineCard(
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
+                        .lockPagerOnTouch()
                         .pointerInput(points) {
+                            fun findClosestIndex(xPx: Float): Int {
+                                val targetFrac = (xPx / size.width.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                                var bestIdx = points.lastIndex
+                                var bestDist = Float.MAX_VALUE
+                                points.forEachIndexed { idx, pt ->
+                                    val dist = abs(pt.xFraction - targetFrac)
+                                    if (dist <= bestDist) {
+                                        bestDist = dist
+                                        bestIdx = idx
+                                    }
+                                }
+                                return bestIdx
+                            }
+
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
                                 val x = down.position.x.coerceIn(0f, size.width.toFloat())
-                                scrubbedIndex = ((x / size.width.toFloat()) * (points.size - 1))
-                                    .roundToInt()
-                                    .coerceIn(0, points.lastIndex)
+                                scrubbedIndex = findClosestIndex(x)
 
                                 while (true) {
                                     val event = awaitPointerEvent(PointerEventPass.Main)
                                     val change = event.changes.firstOrNull() ?: break
                                     if (!change.pressed) break
                                     val currX = change.position.x.coerceIn(0f, size.width.toFloat())
-                                    scrubbedIndex = ((currX / size.width.toFloat()) * (points.size - 1))
-                                        .roundToInt()
-                                        .coerceIn(0, points.lastIndex)
+                                    scrubbedIndex = findClosestIndex(currX)
                                     change.consume()
                                 }
                                 scrubbedIndex = null
@@ -11621,42 +12645,56 @@ fun SharesHoldingTimelineCard(
                     val padBottom = 14.dp.toPx()
                     val usableH = (h - padTop - padBottom).coerceAtLeast(10f)
 
-                    val allValues = points.map { it.value } + if (costBasis > 0) listOf(costBasis) else emptyList()
+                    val allValues = points.flatMap { listOf(it.value, it.costBasisAtDate) }
                     val rawMin = allValues.minOrNull() ?: 0.0
                     val rawMax = allValues.maxOrNull() ?: 1.0
                     val range = max(1.0, rawMax - rawMin)
-                    val minVal = rawMin - range * 0.06
+                    val minVal = (rawMin - range * 0.05).coerceAtLeast(0.0)
                     val maxVal = rawMax + range * 0.06
                     val spread = max(1.0, maxVal - minVal)
 
                     fun pointFor(idx: Int): Offset {
-                        val x = (idx.toFloat() / (points.size - 1).toFloat()) * w
-                        val normY = ((points[idx].value - minVal) / spread).toFloat().coerceIn(0f, 1f)
+                        val pt = points[idx]
+                        val x = pt.xFraction * w
+                        val normY = ((pt.value - minVal) / spread).toFloat().coerceIn(0f, 1f)
                         val y = padTop + usableH * (1f - normY)
                         return Offset(x, y)
                     }
 
-                    // Draw subtle cost basis horizontal baseline
-                    if (costBasis > 0) {
-                        val normCostY = ((costBasis - minVal) / spread).toFloat().coerceIn(0f, 1f)
-                        val costY = padTop + usableH * (1f - normCostY)
-                        drawLine(
-                            color = SlateGray.copy(alpha = 0.35f),
-                            start = Offset(0f, costY),
-                            end = Offset(w, costY),
-                            strokeWidth = 1.dp.toPx()
+                    fun costPointFor(idx: Int): Offset {
+                        val pt = points[idx]
+                        val x = pt.xFraction * w
+                        val normY = ((pt.costBasisAtDate - minVal) / spread).toFloat().coerceIn(0f, 1f)
+                        val y = padTop + usableH * (1f - normY)
+                        return Offset(x, y)
+                    }
+
+                    // Draw cumulative Cost Basis step-line (shows cash added over time)
+                    if (hasShares) {
+                        val costPath = Path()
+                        val costStart = costPointFor(0)
+                        costPath.moveTo(costStart.x, costStart.y)
+                        for (i in 1 until points.size) {
+                            val cp = costPointFor(i)
+                            costPath.lineTo(cp.x, cp.y)
+                        }
+                        drawPath(
+                            path = costPath,
+                            color = SlateGray.copy(alpha = 0.42f),
+                            style = Stroke(
+                                width = 1.3.dp.toPx(),
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                            )
                         )
                     }
 
-                    // Build smooth Cubic Spline Path
+                    // Build step-aware growth Path
                     val path = Path()
                     val startPt = pointFor(0)
                     path.moveTo(startPt.x, startPt.y)
                     for (i in 1 until points.size) {
-                        val p0 = pointFor(i - 1)
                         val p1 = pointFor(i)
-                        val midX = (p0.x + p1.x) / 2f
-                        path.cubicTo(midX, p0.y, midX, p1.y, p1.x, p1.y)
+                        path.lineTo(p1.x, p1.y)
                     }
 
                     // Shaded gradient area under curve
@@ -11670,7 +12708,7 @@ fun SharesHoldingTimelineCard(
                         path = fillPath,
                         brush = Brush.verticalGradient(
                             colors = listOf(
-                                trendColor.copy(alpha = 0.30f),
+                                trendColor.copy(alpha = 0.28f),
                                 trendColor.copy(alpha = 0.03f),
                                 Color.Transparent
                             )
@@ -11684,10 +12722,18 @@ fun SharesHoldingTimelineCard(
                         style = Stroke(width = 2.8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
 
-                    // Active marker / scrub dot
-                    val activePt = pointFor(activeIndex.coerceIn(0, points.lastIndex))
+                    // Draw purchase event markers on the curve (new shares & repeat buys)
+                    points.forEachIndexed { idx, pt ->
+                        if (pt.addedTickers.isNotEmpty() && idx != activeIndex) {
+                            val buyPt = pointFor(idx)
+                            drawCircle(color = BrandSkyBlue.copy(alpha = 0.25f), radius = 5.5.dp.toPx(), center = buyPt)
+                            drawCircle(color = BrandSkyBlue, radius = 3.dp.toPx(), center = buyPt)
+                        }
+                    }
 
-                    // If user is scrubbing, draw vertical guide line
+                    // Active marker / scrub dot
+                    val activePt = pointFor(activeIndex)
+
                     if (scrubbedIndex != null) {
                         drawLine(
                             color = SlateGray.copy(alpha = 0.40f),
@@ -11697,7 +12743,6 @@ fun SharesHoldingTimelineCard(
                         )
                     }
 
-                    // Glow rings around marker
                     drawCircle(color = trendColor.copy(alpha = 0.25f), radius = 8.dp.toPx(), center = activePt)
                     drawCircle(color = trendColor, radius = 4.5.dp.toPx(), center = activePt)
                     drawCircle(color = Color.White, radius = 2.dp.toPx(), center = activePt)
@@ -11711,20 +12756,14 @@ fun SharesHoldingTimelineCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = when (selectedTimeframe) {
-                        "1M" -> "30 days ago"
-                        "3M" -> "3 months ago"
-                        "6M" -> "6 months ago"
-                        "1Y" -> "1 year ago"
-                        else -> "Inception"
-                    },
+                    text = if (hasShares) points.first().dateText else "No holdings",
                     fontSize = 10.sp,
                     color = SlateGray
                 )
                 Text(
-                    text = "Tap & drag across graph to inspect",
+                    text = if (buyMarkersCount > 0) "$buyMarkersCount buy event(s) in range • Drag to inspect" else "Dashed line = cost basis • Drag to inspect",
                     fontSize = 9.sp,
-                    color = SlateGray.copy(alpha = 0.7f)
+                    color = SlateGray.copy(alpha = 0.75f)
                 )
                 Text(
                     text = "Today",
@@ -11745,67 +12784,30 @@ fun SingleShareTimelineCard(
     holding: GroupedShareHolding,
     isWealthHidden: Boolean
 ) {
+    val locale = currentLocale()
     var selectedTimeframe by remember { mutableStateOf("6M") }
     val timeframes = listOf("1M", "3M", "6M", "1Y", "ALL")
     var scrubbedIndex by remember { mutableStateOf<Int?>(null) }
 
-    val totalValue = holding.totalMarketValue
-    val costBasis = holding.totalCostBasis
-    val hasHolding = holding.parcels.isNotEmpty() && totalValue > 0.0
-
-    val points = remember(selectedTimeframe, totalValue, costBasis, holding) {
-        if (!hasHolding) {
-            listOf(
-                TimelinePoint(label = "Start", value = 0.0, dateText = "No data"),
-                TimelinePoint(label = "End", value = 0.0, dateText = "No data")
-            )
-        } else {
-            val count = 25
-            val now = LocalDate.now()
-            val (daysBack, startValRatio) = when (selectedTimeframe) {
-                "1M" -> 30L to 0.08
-                "3M" -> 90L to 0.20
-                "6M" -> 180L to 0.45
-                "1Y" -> 365L to 0.70
-                else -> 730L to 1.00
-            }
-
-            val totalGain = totalValue - costBasis
-            val startVal = if (selectedTimeframe == "ALL") {
-                costBasis
-            } else {
-                (totalValue - totalGain * startValRatio).coerceAtLeast(costBasis * 0.4)
-            }
-
-            val startDate = now.minusDays(daysBack)
-            val dtf = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
-            val seed = (holding.code.hashCode() * 37 + 101) and 0x7FFFFFFF
-
-            (0 until count).map { i ->
-                val progress = i / (count - 1).toFloat()
-                val linear = startVal + (totalValue - startVal) * progress
-                val wave1 = sin(progress * 4.2 * Math.PI + (seed % 7)) * 0.42
-                val wave2 = cos(progress * 6.8 * Math.PI + (seed % 11)) * 0.22
-                val noise = (wave1 + wave2) * (totalValue * 0.032) * (1f - progress)
-                val valAtPoint = if (i == count - 1) totalValue else (linear + noise).coerceAtLeast(0.0)
-
-                val pointDate = startDate.plusDays(((daysBack * progress).toLong()).coerceIn(0L, daysBack))
-                TimelinePoint(
-                    label = if (i == 0) "Start" else if (i == count - 1) "Today" else "",
-                    value = valAtPoint,
-                    dateText = pointDate.format(dtf)
-                )
-            }
-        }
+    val hasHolding = holding.parcels.isNotEmpty()
+    val points = remember(selectedTimeframe, holding) {
+        buildPurchaseAwareTimelinePoints(shares = holding.parcels, timeframe = selectedTimeframe)
     }
 
-    val activeIndex = scrubbedIndex ?: (points.size - 1)
-    val activePoint = points[activeIndex.coerceIn(0, points.lastIndex)]
+    val activeIndex = (scrubbedIndex ?: (points.size - 1)).coerceIn(0, points.lastIndex)
+    val activePoint = points[activeIndex]
     val displayValue = if (isWealthHidden) "$ ••••••" else formatCurrency(activePoint.value, 2)
-    val referenceStart = points.first().value
-    val periodGain = activePoint.value - referenceStart
-    val periodGainPct = if (referenceStart > 0) (periodGain / referenceStart) * 100 else 0.0
-    val isPositive = periodGain >= 0
+    val periodStartVal = points.first().value
+    val activeCostBasis = if (hasHolding) activePoint.costBasisAtDate else 0.0
+    val periodValueGrowth = activePoint.value - periodStartVal
+    val periodGrowthPct = if (periodStartVal > 0.0) (periodValueGrowth / periodStartVal) * 100.0 else 0.0
+    val unrealisedGain = activePoint.value - activeCostBasis
+    val unrealisedPct = if (activeCostBasis > 0.0) (unrealisedGain / activeCostBasis) * 100.0 else 0.0
+
+    val usePeriodGrowth = periodStartVal > 0.0
+    val headlineDelta = if (usePeriodGrowth) periodValueGrowth else unrealisedGain
+    val headlinePct = if (usePeriodGrowth) periodGrowthPct else unrealisedPct
+    val isPositive = headlineDelta >= 0.0
     val trendColor = if (isPositive) BrandMintGreen else BrandCoralPink
 
     Card(
@@ -11843,7 +12845,10 @@ fun SingleShareTimelineCard(
                     timeframes.forEach { tf ->
                         val isTfSelected = selectedTimeframe == tf
                         Surface(
-                            onClick = { selectedTimeframe = tf },
+                            onClick = {
+                                selectedTimeframe = tf
+                                scrubbedIndex = null
+                            },
                             shape = RoundedCornerShape(8.dp),
                             color = if (isTfSelected) trendColor.copy(alpha = 0.22f) else Color.Transparent,
                             border = if (isTfSelected) BorderStroke(1.dp, trendColor.copy(alpha = 0.5f)) else null
@@ -11867,7 +12872,7 @@ fun SingleShareTimelineCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Bottom
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
                         text = displayValue,
                         fontSize = 26.sp,
@@ -11885,10 +12890,16 @@ fun SingleShareTimelineCard(
                             modifier = Modifier.size(13.dp)
                         )
                         Text(
-                            text = if (isWealthHidden) "$ •••••• (••••%)" else "${if (periodGain >= 0) "+" else ""}${formatCurrency(periodGain, 2)} (${String.format(Locale.getDefault(), "%.2f", periodGainPct)}%)",
+                            text = if (isWealthHidden) {
+                                "$ •••••• (••••%)"
+                            } else if (activeCostBasis <= 0.0 && activePoint.value <= 0.0) {
+                                "Not yet owned"
+                            } else {
+                                "${if (headlineDelta >= 0) "+" else ""}${formatCurrency(headlineDelta, 2)} (${String.format(locale, "%.2f", headlinePct)}%)"
+                            },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = trendColor
+                            color = if (activeCostBasis <= 0.0 && activePoint.value <= 0.0) SlateGray else trendColor
                         )
                         Text(
                             text = if (scrubbedIndex != null) "• ${activePoint.dateText}" else "• $selectedTimeframe",
@@ -11898,10 +12909,14 @@ fun SingleShareTimelineCard(
                     }
                 }
 
-                if (costBasis > 0 && !isWealthHidden) {
+                if (hasHolding && !isWealthHidden) {
                     Column(horizontalAlignment = Alignment.End) {
-                        Text("Cost Basis", fontSize = 10.sp, color = SlateGray)
-                        Text(formatCurrency(costBasis, 0), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SlateGray)
+                        Text(
+                            if (scrubbedIndex != null) "Invested Then" else "Cost Basis",
+                            fontSize = 10.sp,
+                            color = SlateGray
+                        )
+                        Text(formatCurrency(activeCostBasis, 0), fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SlateGray)
                     }
                 }
             }
@@ -11914,22 +12929,33 @@ fun SingleShareTimelineCard(
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
+                        .lockPagerOnTouch()
                         .pointerInput(points) {
+                            fun findClosestIndex(xPx: Float): Int {
+                                val targetFrac = (xPx / size.width.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f)
+                                var bestIdx = points.lastIndex
+                                var bestDist = Float.MAX_VALUE
+                                points.forEachIndexed { idx, pt ->
+                                    val dist = abs(pt.xFraction - targetFrac)
+                                    if (dist <= bestDist) {
+                                        bestDist = dist
+                                        bestIdx = idx
+                                    }
+                                }
+                                return bestIdx
+                            }
+
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
                                 val x = down.position.x.coerceIn(0f, size.width.toFloat())
-                                scrubbedIndex = ((x / size.width.toFloat()) * (points.size - 1))
-                                    .roundToInt()
-                                    .coerceIn(0, points.lastIndex)
+                                scrubbedIndex = findClosestIndex(x)
 
                                 while (true) {
                                     val event = awaitPointerEvent(PointerEventPass.Main)
                                     val change = event.changes.firstOrNull() ?: break
                                     if (!change.pressed) break
                                     val currX = change.position.x.coerceIn(0f, size.width.toFloat())
-                                    scrubbedIndex = ((currX / size.width.toFloat()) * (points.size - 1))
-                                        .roundToInt()
-                                        .coerceIn(0, points.lastIndex)
+                                    scrubbedIndex = findClosestIndex(currX)
                                     change.consume()
                                 }
                                 scrubbedIndex = null
@@ -11943,29 +12969,45 @@ fun SingleShareTimelineCard(
                     val padBottom = 14.dp.toPx()
                     val usableH = (h - padTop - padBottom).coerceAtLeast(10f)
 
-                    val allValues = points.map { it.value } + if (costBasis > 0) listOf(costBasis) else emptyList()
+                    val allValues = points.flatMap { listOf(it.value, it.costBasisAtDate) }
                     val rawMin = allValues.minOrNull() ?: 0.0
                     val rawMax = allValues.maxOrNull() ?: 1.0
                     val range = max(1.0, rawMax - rawMin)
-                    val minVal = rawMin - range * 0.06
+                    val minVal = (rawMin - range * 0.05).coerceAtLeast(0.0)
                     val maxVal = rawMax + range * 0.06
                     val spread = max(1.0, maxVal - minVal)
 
                     fun pointFor(idx: Int): Offset {
-                        val x = (idx.toFloat() / (points.size - 1).toFloat()) * w
-                        val normY = ((points[idx].value - minVal) / spread).toFloat().coerceIn(0f, 1f)
+                        val pt = points[idx]
+                        val x = pt.xFraction * w
+                        val normY = ((pt.value - minVal) / spread).toFloat().coerceIn(0f, 1f)
                         val y = padTop + usableH * (1f - normY)
                         return Offset(x, y)
                     }
 
-                    if (costBasis > 0) {
-                        val normCostY = ((costBasis - minVal) / spread).toFloat().coerceIn(0f, 1f)
-                        val costY = padTop + usableH * (1f - normCostY)
-                        drawLine(
-                            color = SlateGray.copy(alpha = 0.35f),
-                            start = Offset(0f, costY),
-                            end = Offset(w, costY),
-                            strokeWidth = 1.dp.toPx()
+                    fun costPointFor(idx: Int): Offset {
+                        val pt = points[idx]
+                        val x = pt.xFraction * w
+                        val normY = ((pt.costBasisAtDate - minVal) / spread).toFloat().coerceIn(0f, 1f)
+                        val y = padTop + usableH * (1f - normY)
+                        return Offset(x, y)
+                    }
+
+                    if (hasHolding) {
+                        val costPath = Path()
+                        val costStart = costPointFor(0)
+                        costPath.moveTo(costStart.x, costStart.y)
+                        for (i in 1 until points.size) {
+                            val cp = costPointFor(i)
+                            costPath.lineTo(cp.x, cp.y)
+                        }
+                        drawPath(
+                            path = costPath,
+                            color = SlateGray.copy(alpha = 0.42f),
+                            style = Stroke(
+                                width = 1.3.dp.toPx(),
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f), 0f)
+                            )
                         )
                     }
 
@@ -11973,10 +13015,8 @@ fun SingleShareTimelineCard(
                     val startPt = pointFor(0)
                     path.moveTo(startPt.x, startPt.y)
                     for (i in 1 until points.size) {
-                        val p0 = pointFor(i - 1)
                         val p1 = pointFor(i)
-                        val midX = (p0.x + p1.x) / 2f
-                        path.cubicTo(midX, p0.y, midX, p1.y, p1.x, p1.y)
+                        path.lineTo(p1.x, p1.y)
                     }
 
                     val fillPath = Path().apply {
@@ -11989,7 +13029,7 @@ fun SingleShareTimelineCard(
                         path = fillPath,
                         brush = Brush.verticalGradient(
                             colors = listOf(
-                                trendColor.copy(alpha = 0.30f),
+                                trendColor.copy(alpha = 0.28f),
                                 trendColor.copy(alpha = 0.03f),
                                 Color.Transparent
                             )
@@ -12002,7 +13042,15 @@ fun SingleShareTimelineCard(
                         style = Stroke(width = 2.8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
 
-                    val activePt = pointFor(activeIndex.coerceIn(0, points.lastIndex))
+                    points.forEachIndexed { idx, pt ->
+                        if (pt.addedTickers.isNotEmpty() && idx != activeIndex) {
+                            val buyPt = pointFor(idx)
+                            drawCircle(color = BrandSkyBlue.copy(alpha = 0.25f), radius = 5.5.dp.toPx(), center = buyPt)
+                            drawCircle(color = BrandSkyBlue, radius = 3.dp.toPx(), center = buyPt)
+                        }
+                    }
+
+                    val activePt = pointFor(activeIndex)
 
                     if (scrubbedIndex != null) {
                         drawLine(
@@ -12025,13 +13073,7 @@ fun SingleShareTimelineCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = when (selectedTimeframe) {
-                        "1M" -> "30 days ago"
-                        "3M" -> "3 months ago"
-                        "6M" -> "6 months ago"
-                        "1Y" -> "1 year ago"
-                        else -> "Inception"
-                    },
+                    text = if (hasHolding) points.first().dateText else "No holdings",
                     fontSize = 10.sp,
                     color = SlateGray
                 )
@@ -12066,10 +13108,17 @@ fun ShareDetailView(
     onEditParcel: (ShareParcel) -> Unit,
     onDeleteParcel: (ShareParcel) -> Unit
 ) {
+    val isDark = LocalIsDarkTheme.current
+    val locale = currentLocale()
     val orbSpacing = 14.dp
     val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
     val sharesAccent = BrandSkyBlue
+    val sharesTextAccent = if (isDark) BrandSkyBlue else Color(0xFF0284C7)
+    val gainTextColor = if (isDark) BrandMintGreen else Color(0xFF059669)
+    val lossTextColor = if (isDark) BrandCoralPink else Color(0xFFDC2626)
     fun maskVal(amt: Double, decimals: Int = 2): String = if (isWealthHidden) "$ ••••••" else formatCurrency(amt, decimals)
+    fun maskUsd(amt: Double, decimals: Int = 2, showPlus: Boolean = false): String =
+        if (isWealthHidden) "US$ ••••••" else formatUsdCurrency(amt, decimals, showPlus)
 
     LazyColumn(
         modifier = Modifier
@@ -12100,7 +13149,7 @@ fun ShareDetailView(
                         )
                     }
                     Spacer(Modifier.width(10.dp))
-                    AsxShareLogoBadge(ticker = holding.code, size = 38.dp)
+                    AsxShareLogoBadge(ticker = holding.code, size = 38.dp, market = holding.market)
                     Spacer(Modifier.width(10.dp))
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -12110,6 +13159,22 @@ fun ShareDetailView(
                                 fontSize = 20.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (holding.isUsMarket) BrandPurple.copy(alpha = 0.18f) else sharesAccent.copy(alpha = 0.14f),
+                                border = BorderStroke(
+                                    0.8.dp,
+                                    (if (holding.isUsMarket) BrandPurple else sharesAccent).copy(alpha = 0.45f)
+                                )
+                            ) {
+                                Text(
+                                    text = if (holding.isUsMarket) "US" else "ASX",
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.5.dp),
+                                    fontSize = 9.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = if (holding.isUsMarket) (if (isDark) BrandPurple else Color(0xFF7C3AED)) else sharesTextAccent
+                                )
+                            }
                             holding.owners.forEach { ownerName ->
                                 val isP1 = ownerName.equals(appConfig.person1Name, ignoreCase = true)
                                 val col = if (isP1) person1Color else person2Color
@@ -12164,30 +13229,53 @@ fun ShareDetailView(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
-                            Text("Total Holding Value", fontSize = 12.sp, color = SlateGray, fontWeight = FontWeight.Medium)
+                            Text(
+                                if (holding.isUsMarket) "Total Holding Value (AUD)" else "Total Holding Value",
+                                fontSize = 12.sp,
+                                color = SlateGray,
+                                fontWeight = FontWeight.Medium
+                            )
                             Text(
                                 maskVal(holding.totalMarketValue, 2),
                                 fontSize = 28.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = sharesAccent.copy(alpha = 0.15f),
-                            border = BorderStroke(1.dp, sharesAccent.copy(alpha = 0.4f))
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(BrandMintGreen))
+                            if (holding.isUsMarket && holding.usdTotalMarketValue > 0 && !isWealthHidden) {
                                 Text(
-                                    "${formatCurrency(holding.currentPrice, 2)} live",
+                                    "≈ ${formatUsdCurrency(holding.usdTotalMarketValue, 2)} USD",
                                     fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = sharesAccent
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = SlateGray
+                                )
+                            }
+                        }
+                        Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = sharesAccent.copy(alpha = 0.15f),
+                                border = BorderStroke(1.dp, sharesAccent.copy(alpha = 0.4f))
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(BrandMintGreen))
+                                    Text(
+                                        if (isWealthHidden) "$ •••••• live" else "${formatCurrency(holding.currentPrice, 2)} AUD live",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = sharesTextAccent
+                                    )
+                                }
+                            }
+                            if (holding.isUsMarket && holding.usdCurrentPrice > 0 && !isWealthHidden) {
+                                Text(
+                                    "${formatUsdCurrency(holding.usdCurrentPrice, 2)} USD / share",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = SlateGray
                                 )
                             }
                         }
@@ -12198,7 +13286,7 @@ fun ShareDetailView(
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         val isGain = holding.totalGainLoss >= 0
-                        val gainColor = if (isGain) BrandMintGreen else BrandCoralPink
+                        val gainColor = if (isGain) gainTextColor else lossTextColor
                         Icon(
                             if (isGain) Icons.Default.NorthEast else Icons.Default.SouthEast,
                             contentDescription = null,
@@ -12207,12 +13295,16 @@ fun ShareDetailView(
                         )
                         Text(
                             if (isWealthHidden) "$ •••••• (••••%)"
-                            else "${if (isGain) "+" else ""}${formatCurrency(holding.totalGainLoss, 2)} (${String.format(Locale.getDefault(), "%.2f", holding.gainLossPct)}%)",
+                            else "${if (isGain) "+" else ""}${formatCurrency(holding.totalGainLoss, 2)} (${String.format(locale, "%.2f", holding.gainLossPct)}%)",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
                             color = if (isWealthHidden) MaterialTheme.colorScheme.onSurface else gainColor
                         )
-                        Text("total return", fontSize = 12.sp, color = SlateGray)
+                        Text(
+                            if (holding.isUsMarket) "total AUD return" else "total return",
+                            fontSize = 12.sp,
+                            color = SlateGray
+                        )
                     }
 
                     HorizontalDivider()
@@ -12227,11 +13319,158 @@ fun ShareDetailView(
                         }
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("Avg Purchase Price", fontSize = 11.sp, color = SlateGray)
-                            Text(maskVal(holding.averagePurchasePrice, 2), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = sharesAccent)
+                            Text(maskVal(holding.averagePurchasePrice, 2), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = sharesTextAccent)
                         }
                         Column(horizontalAlignment = Alignment.End) {
                             Text("Total Cost Basis", fontSize = 11.sp, color = SlateGray)
                             Text(maskVal(holding.totalCostBasis, 2), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (holding.isUsMarket) {
+            item {
+                val fx = holding.fxRate
+                val hasUsdData = holding.usdCurrentPrice > 0 || holding.usdTotalCostBasis > 0
+                val fxAccent = if (isDark) BrandPurple else Color(0xFF7C3AED)
+                val fxImpactPct = holding.gainLossPct - holding.usdGainLossPct
+                val fxIsTailwind = fxImpactPct >= 0
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, BrandPurple.copy(alpha = 0.28f)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "US MARKET & FX INSIGHT",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = fxAccent,
+                                letterSpacing = 0.9.sp
+                            )
+                            if (fx > 0) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = BrandPurple.copy(alpha = 0.14f),
+                                    border = BorderStroke(0.8.dp, BrandPurple.copy(alpha = 0.35f))
+                                ) {
+                                    Text(
+                                        text = "1 USD = A$${String.format(locale, "%.4f", fx)}",
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = fxAccent
+                                    )
+                                }
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                            border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("US SHARE PRICE", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = SlateGray, letterSpacing = 0.5.sp)
+                                    Text(
+                                        if (hasUsdData) maskUsd(holding.usdCurrentPrice, 2) else "Tap Sync",
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        if (fx > 0) "1 AUD = US$${String.format(locale, "%.4f", 1.0 / fx)}" else "USD native quote",
+                                        fontSize = 10.sp,
+                                        color = SlateGray
+                                    )
+                                }
+                                Icon(
+                                    Icons.AutoMirrored.Filled.CompareArrows,
+                                    contentDescription = null,
+                                    tint = fxAccent,
+                                    modifier = Modifier.padding(horizontal = 6.dp).size(18.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                                    Text("AUD EQUIVALENT", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = sharesTextAccent, letterSpacing = 0.5.sp)
+                                    Text(
+                                        maskVal(holding.currentPrice, 2),
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = sharesTextAccent
+                                    )
+                                    Text(
+                                        "Used in portfolio totals",
+                                        fontSize = 10.sp,
+                                        color = SlateGray
+                                    )
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("USD Market Value", fontSize = 10.sp, color = SlateGray)
+                                Text(maskUsd(holding.usdTotalMarketValue, 2), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("USD Cost Basis", fontSize = 10.sp, color = SlateGray)
+                                Text(maskUsd(holding.usdTotalCostBasis, 2), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                                Text("USD Avg Buy", fontSize = 10.sp, color = SlateGray)
+                                Text(maskUsd(holding.usdAveragePurchasePrice, 2), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+
+                        if (holding.usdTotalCostBasis > 0 && !isWealthHidden) {
+                            HorizontalDivider()
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("Stock Return (USD)", fontSize = 10.sp, color = SlateGray)
+                                    val usdGainCol = if (holding.usdTotalGainLoss >= 0) gainTextColor else lossTextColor
+                                    Text(
+                                        "${formatUsdCurrency(holding.usdTotalGainLoss, 2, showPlus = true)} (${String.format(locale, "%.2f", holding.usdGainLossPct)}%)",
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = usdGainCol
+                                    )
+                                }
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text("AUD Currency Effect", fontSize = 10.sp, color = SlateGray)
+                                    val fxCol = if (fxIsTailwind) gainTextColor else lossTextColor
+                                    Text(
+                                        "${if (fxIsTailwind) "+" else ""}${String.format(locale, "%.2f", fxImpactPct)}% ${if (fxIsTailwind) "FX tailwind" else "FX headwind"}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = fxCol
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -12275,7 +13514,19 @@ fun ShareDetailView(
             val isP1 = parcel.owner.equals(appConfig.person1Name, ignoreCase = true)
             val ownerBadgeColor = if (isP1) person1Color else person2Color
             val isGain = parcelGain >= 0
-            val gainColor = if (isGain) BrandMintGreen else BrandCoralPink
+            val gainColor = if (isGain) gainTextColor else lossTextColor
+            val isUsParcel = parcel.market.equals("US", ignoreCase = true)
+            val parcelUsdBuy = when {
+                parcel.usdPurchasePrice > 0 -> parcel.usdPurchasePrice
+                parcel.fxRateAtSync > 0 && parcel.purchasePrice > 0 -> parcel.purchasePrice / parcel.fxRateAtSync
+                holding.fxRate > 0 && parcel.purchasePrice > 0 -> parcel.purchasePrice / holding.fxRate
+                else -> 0.0
+            }
+            val parcelUsdCurr = when {
+                parcel.usdCurrentPrice > 0 -> parcel.usdCurrentPrice
+                holding.usdCurrentPrice > 0 -> holding.usdCurrentPrice
+                else -> 0.0
+            }
 
             SwipeToRevealBox(
                 onEdit = { onEditParcel(parcel) },
@@ -12356,6 +13607,13 @@ fun ShareDetailView(
                                         fontWeight = FontWeight.ExtraBold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
+                                    if (isUsParcel && parcelUsdBuy > 0 && !isWealthHidden) {
+                                        Text(
+                                            formatUsdCurrency(parcelUsdBuy, 2),
+                                            fontSize = 9.5.sp,
+                                            color = SlateGray
+                                        )
+                                    }
                                 }
                                 Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
                                 Column {
@@ -12376,16 +13634,30 @@ fun ShareDetailView(
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
+                                    if (isUsParcel && parcelUsdBuy > 0 && !isWealthHidden) {
+                                        Text(
+                                            formatUsdCurrency(parcel.units * parcelUsdBuy, 2),
+                                            fontSize = 9.5.sp,
+                                            color = SlateGray
+                                        )
+                                    }
                                 }
                                 Box(modifier = Modifier.width(1.dp).height(22.dp).background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)))
                                 Column(horizontalAlignment = Alignment.End) {
-                                    Text("CURRENT VALUE", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = sharesAccent, letterSpacing = 0.5.sp)
+                                    Text("CURRENT VALUE", fontSize = 8.5.sp, fontWeight = FontWeight.Bold, color = sharesTextAccent, letterSpacing = 0.5.sp)
                                     Text(
                                         maskVal(parcelVal, 2),
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = sharesAccent
+                                        color = sharesTextAccent
                                     )
+                                    if (isUsParcel && parcelUsdCurr > 0 && !isWealthHidden) {
+                                        Text(
+                                            formatUsdCurrency(parcel.units * parcelUsdCurr, 2),
+                                            fontSize = 9.5.sp,
+                                            color = SlateGray
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -12399,7 +13671,7 @@ fun ShareDetailView(
                                 text = if (parcel.purchasePrice > 0 && parcel.currentPrice > 0) {
                                     val diff = parcel.currentPrice - parcel.purchasePrice
                                     val diffPct = (diff / parcel.purchasePrice) * 100
-                                    "Per share: ${if (diff >= 0) "+" else ""}${formatCurrency(diff, 2)} (${String.format(Locale.getDefault(), "%.1f", diffPct)}%)"
+                                    "Per share: ${if (diff >= 0) "+" else ""}${formatCurrency(diff, 2)} (${String.format(locale, "%.1f", diffPct)}%)"
                                 } else "",
                                 fontSize = 10.5.sp,
                                 color = SlateGray,
@@ -12424,7 +13696,7 @@ fun ShareDetailView(
                                     )
                                     Text(
                                         if (isWealthHidden) "$ ••••••"
-                                        else "${if (isGain) "+" else ""}${formatCurrency(parcelGain, 2)} (${String.format(Locale.getDefault(), "%.1f", parcelGainPct)}%)",
+                                        else "${if (isGain) "+" else ""}${formatCurrency(parcelGain, 2)} (${String.format(locale, "%.1f", parcelGainPct)}%)",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = if (isWealthHidden) MaterialTheme.colorScheme.onSurface else gainColor
@@ -12451,8 +13723,8 @@ fun SuperAndSharesScreen(
     sharesList: List<ShareParcel>,
     superAccountsList: List<SuperAccount>,
     isWealthHidden: Boolean = false,
-    onAddShare: (String, String, Double, Double, Double, String) -> Unit,
-    onEditShare: (String, String, String, Double, Double, Double, String) -> Unit,
+    onAddShare: (String, String, Double, Double, Double, String, String, Double, Double, Double) -> Unit,
+    onEditShare: (String, String, String, Double, Double, Double, String, String, Double, Double, Double) -> Unit,
     onDeleteShare: (String) -> Unit,
     onUpdateSharesList: (List<ShareParcel>) -> Unit,
     onAddSuperAccount: (String, String, Double) -> Unit,
@@ -12460,11 +13732,15 @@ fun SuperAndSharesScreen(
     onDeleteSuperAccount: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val isDark = LocalIsDarkTheme.current
+    val locale = currentLocale()
     var selectedCategory by remember { mutableIntStateOf(0) }
     var ownerFilter by remember { mutableStateOf("All") }
-    var selectedShareCode by remember { mutableStateOf<String?>(null) }
+    var selectedHoldingKey by remember { mutableStateOf<String?>(null) }
     var showAddShareDialog by remember { mutableStateOf(false) }
     var addPurchaseForHolding by remember { mutableStateOf<GroupedShareHolding?>(null) }
+    var holdingForParcelPicker by remember { mutableStateOf<GroupedShareHolding?>(null) }
+    var holdingForDeleteConfirm by remember { mutableStateOf<GroupedShareHolding?>(null) }
     var shareToEdit by remember { mutableStateOf<ShareParcel?>(null) }
     var shareToDelete by remember { mutableStateOf<ShareParcel?>(null) }
     var showAddSuperDialog by remember { mutableStateOf(false) }
@@ -12474,31 +13750,65 @@ fun SuperAndSharesScreen(
     val scope = rememberCoroutineScope()
     val prefs = context.getSharedPreferences("expnz_public_wealth_v2", Context.MODE_PRIVATE)
     var lastSyncTime by remember { mutableLongStateOf(prefs.getLong("last_asx_sync", 0L)) }
+    val latestSharesList by rememberUpdatedState(sharesList)
+
+    suspend fun syncAllSharePrices(showToast: Boolean) {
+        if (isSyncing) return
+        isSyncing = true
+        val snapshot = latestSharesList
+        val hasUsShares = snapshot.any { it.market.equals("US", ignoreCase = true) }
+        val liveFxRate = if (hasUsShares) fetchUsdToAudRate(context) else null
+        val quoteCache = mutableMapOf<String, LiveShareQuote?>()
+        val failedTickers = mutableListOf<String>()
+        var updatedCount = 0
+        val updated = snapshot.map { parcel ->
+            val mkt = parcel.market.trim().uppercase().takeIf { it == "US" } ?: "ASX"
+            val key = "$mkt:${parcel.code.trim().uppercase()}"
+            val quote = quoteCache.getOrPut(key) {
+                fetchShareLiveQuote(
+                    ticker = parcel.code,
+                    market = mkt,
+                    usdToAudRateOverride = liveFxRate,
+                    context = context
+                )
+            }
+            if (quote != null && quote.audPrice > 0.0) {
+                updatedCount++
+                parcel.copy(
+                    currentPrice = quote.audPrice,
+                    usdCurrentPrice = quote.usdPrice ?: parcel.usdCurrentPrice,
+                    fxRateAtSync = quote.usdToAudRate ?: parcel.fxRateAtSync
+                )
+            } else {
+                if (!failedTickers.contains(parcel.code.uppercase())) {
+                    failedTickers.add(parcel.code.uppercase())
+                }
+                parcel
+            }
+        }
+        onUpdateSharesList(updated)
+        val newSyncTime = System.currentTimeMillis()
+        prefs.edit { putLong("last_asx_sync", newSyncTime) }
+        lastSyncTime = newSyncTime
+        isSyncing = false
+        if (showToast) {
+            val msg = when {
+                failedTickers.isEmpty() && updatedCount > 0 ->
+                    if (hasUsShares) "Updated ASX & US live prices (AUD)" else "Updated ASX live prices"
+                updatedCount > 0 ->
+                    "Updated prices (couldn't fetch: ${failedTickers.joinToString(", ")})"
+                else ->
+                    "Could not fetch live prices. Check connection."
+            }
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     LaunchedEffect(selectedCategory) {
-        if (selectedCategory == 0) {
+        if (selectedCategory == 0 && latestSharesList.isNotEmpty()) {
             val currentTime = System.currentTimeMillis()
             if (currentTime - lastSyncTime > 15 * 60 * 1000) { // 15 mins
-                if (!isSyncing) {
-                    isSyncing = true
-                    val priceCache = mutableMapOf<String, Double?>()
-                    val updated = sharesList.map { parcel ->
-                        val key = parcel.code.trim().uppercase()
-                        val livePrice = priceCache.getOrPut(key) {
-                            fetchAsxLivePrice(parcel.code)
-                        }
-                        if (livePrice != null && livePrice > 0.0) {
-                            parcel.copy(currentPrice = livePrice)
-                        } else {
-                            parcel
-                        }
-                    }
-                    onUpdateSharesList(updated)
-                    val newSyncTime = System.currentTimeMillis()
-                    prefs.edit { putLong("last_asx_sync", newSyncTime) }
-                    lastSyncTime = newSyncTime
-                    isSyncing = false
-                }
+                syncAllSharePrices(showToast = false)
             }
         }
     }
@@ -12516,10 +13826,13 @@ fun SuperAndSharesScreen(
     // Always automatically reorganised from most valuable to least valuable
     val groupedShares = remember(filteredShares) {
         filteredShares
-            .groupBy { it.code.uppercase() }
-            .map { (code, parcels) ->
+            .groupBy {
+                val mkt = it.market.trim().uppercase().takeIf { m -> m == "US" } ?: "ASX"
+                "$mkt:${it.code.trim().uppercase()}"
+            }
+            .map { (_, parcels) ->
                 GroupedShareHolding(
-                    code = code,
+                    code = parcels.first().code.trim().uppercase(),
                     owners = parcels.map { it.owner }.distinct(),
                     parcels = parcels.sortedByDescending { it.purchaseDate }
                 )
@@ -12534,17 +13847,20 @@ fun SuperAndSharesScreen(
 
     val totalSuperVal = filteredSuper.sumOf { it.balance }
     val sharesAccent = BrandSkyBlue
+    val sharesTextAccent = if (isDark) BrandSkyBlue else Color(0xFF0284C7)
+    val gainTextColor = if (isDark) BrandMintGreen else Color(0xFF059669)
+    val lossTextColor = if (isDark) BrandCoralPink else Color(0xFFDC2626)
 
     val orbSpacing = 14.dp
     val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
 
-    val activeHolding = selectedShareCode?.let { code ->
-        groupedShares.find { it.code.equals(code, ignoreCase = true) }
+    val activeHolding = selectedHoldingKey?.let { key ->
+        groupedShares.find { it.holdingKey == key }
     }
 
     if (selectedCategory == 0 && activeHolding != null) {
         BackHandler {
-            selectedShareCode = null
+            selectedHoldingKey = null
         }
         ShareDetailView(
             holding = activeHolding,
@@ -12552,7 +13868,7 @@ fun SuperAndSharesScreen(
             person1Color = person1Color,
             person2Color = person2Color,
             isWealthHidden = isWealthHidden,
-            onBack = { selectedShareCode = null },
+            onBack = { selectedHoldingKey = null },
             onAddPurchase = { addPurchaseForHolding = activeHolding },
             onEditParcel = { shareToEdit = it },
             onDeleteParcel = { shareToDelete = it }
@@ -12569,7 +13885,7 @@ fun SuperAndSharesScreen(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     CategorySelectCard(
                         title = "Shares Portfolio",
-                        subtitle = "ASX Investments",
+                        subtitle = "ASX & US (AUD)",
                         totalValue = totalSharesVal,
                         accent = sharesAccent,
                         isSelected = selectedCategory == 0,
@@ -12577,7 +13893,7 @@ fun SuperAndSharesScreen(
                         modifier = Modifier.weight(1f),
                         onClick = {
                             selectedCategory = 0
-                            selectedShareCode = null
+                            selectedHoldingKey = null
                         }
                     )
                     CategorySelectCard(
@@ -12590,7 +13906,7 @@ fun SuperAndSharesScreen(
                         modifier = Modifier.weight(1f),
                         onClick = {
                             selectedCategory = 1
-                            selectedShareCode = null
+                            selectedHoldingKey = null
                         }
                     )
                 }
@@ -12618,7 +13934,7 @@ fun SuperAndSharesScreen(
                             }
 
                             val lastSyncString = if (lastSyncTime == 0L) "Never" else {
-                                val sdf = java.text.SimpleDateFormat("dd MMM HH:mm", Locale.getDefault())
+                                val sdf = java.text.SimpleDateFormat("dd MMM HH:mm", locale)
                                 sdf.format(java.util.Date(lastSyncTime))
                             }
                             Text("Synced: $lastSyncString", fontSize = 10.sp, color = SlateGray, fontWeight = FontWeight.Bold)
@@ -12645,28 +13961,8 @@ fun SuperAndSharesScreen(
 
                             OutlinedButton(
                                 onClick = {
-                                    if (!isSyncing) {
-                                        isSyncing = true
-                                        scope.launch {
-                                            val priceCache = mutableMapOf<String, Double?>()
-                                            val updated = sharesList.map { parcel ->
-                                                val key = parcel.code.trim().uppercase()
-                                                val livePrice = priceCache.getOrPut(key) {
-                                                    fetchAsxLivePrice(parcel.code)
-                                                }
-                                                if (livePrice != null && livePrice > 0.0) {
-                                                    parcel.copy(currentPrice = livePrice)
-                                                } else {
-                                                    parcel
-                                                }
-                                            }
-                                            onUpdateSharesList(updated)
-                                            val newTime = System.currentTimeMillis()
-                                            prefs.edit { putLong("last_asx_sync", newTime) }
-                                            lastSyncTime = newTime
-                                            isSyncing = false
-                                            Toast.makeText(context, "Updated ASX live prices", Toast.LENGTH_SHORT).show()
-                                        }
+                                    scope.launch {
+                                        syncAllSharePrices(showToast = true)
                                     }
                                 },
                                 enabled = !isSyncing,
@@ -12678,11 +13974,11 @@ fun SuperAndSharesScreen(
                                 if (isSyncing) {
                                     CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = sharesAccent)
                                     Spacer(Modifier.width(4.dp))
-                                    Text("Syncing", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = sharesAccent, maxLines = 1)
+                                    Text("Syncing", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = sharesTextAccent, maxLines = 1)
                                 } else {
-                                    Icon(Icons.Default.Refresh, contentDescription = "Sync", modifier = Modifier.size(13.dp), tint = sharesAccent)
+                                    Icon(Icons.Default.Refresh, contentDescription = "Sync", modifier = Modifier.size(13.dp), tint = sharesTextAccent)
                                     Spacer(Modifier.width(4.dp))
-                                    Text("Sync", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = sharesAccent, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("Sync", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = sharesTextAccent, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
                         }
@@ -12764,7 +14060,7 @@ fun SuperAndSharesScreen(
                                     )
                                     Text(
                                         if (isWealthHidden) "$ ••••••"
-                                        else "${if (isGain) "+" else ""}${formatCurrency(totalSharesGainLoss, 2)} (${String.format(Locale.getDefault(), "%.1f", totalReturnPct)}%)",
+                                        else "${if (isGain) "+" else ""}${formatCurrency(totalSharesGainLoss, 2)} (${String.format(locale, "%.1f", totalReturnPct)}%)",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = if (isWealthHidden) MaterialTheme.colorScheme.onSurface else gainColor
@@ -12825,7 +14121,7 @@ fun SuperAndSharesScreen(
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
-                                    "Tap '+ Add Share' above to log your first ASX share purchase.",
+                                    "Tap '+ Add Share' above to log your first ASX or US share purchase.",
                                     fontSize = 12.sp,
                                     color = SlateGray,
                                     textAlign = TextAlign.Center
@@ -12834,264 +14130,313 @@ fun SuperAndSharesScreen(
                         }
                     }
                 } else {
-                    items(groupedShares, key = { it.code }) { holding ->
+                    items(groupedShares, key = { it.holdingKey }) { holding ->
                         val isGain = holding.totalGainLoss >= 0
-                        val gainColor = if (isGain) BrandMintGreen else BrandCoralPink
+                        val gainColor = if (isGain) gainTextColor else lossTextColor
+                        val marketBadgeColor = if (holding.isUsMarket) (if (isDark) BrandPurple else Color(0xFF7C3AED)) else sharesTextAccent
 
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { selectedShareCode = holding.code },
-                            shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        SwipeToRevealBox(
+                            onEdit = {
+                                if (holding.parcels.size == 1) {
+                                    shareToEdit = holding.parcels.first()
+                                } else {
+                                    holdingForParcelPicker = holding
+                                }
+                            },
+                            onDelete = {
+                                if (holding.parcels.size == 1) {
+                                    shareToDelete = holding.parcels.first()
+                                } else {
+                                    holdingForDeleteConfirm = holding
+                                }
+                            }
                         ) {
-                            Column(
+                            Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(14.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                                    .clickable { selectedHoldingKey = holding.holdingKey },
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                             ) {
-                                // TOP TIER: ASX Logo, Ticker & Owner Chips, Total Value & Gain/Loss Pill
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
+                                    // TOP TIER: Share Logo, Ticker, Market & Owner Chips, Total AUD Value & Gain/Loss Pill
                                     Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier.weight(1f).padding(end = 8.dp)
-                                    ) {
-                                        AsxShareLogoBadge(ticker = holding.code, size = 38.dp)
-                                        Spacer(Modifier.width(10.dp))
-                                        Column {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                            ) {
-                                                Surface(
-                                                    shape = RoundedCornerShape(6.dp),
-                                                    color = sharesAccent.copy(alpha = 0.16f)
-                                                ) {
-                                                    Text(
-                                                        holding.code.uppercase(),
-                                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
-                                                        fontWeight = FontWeight.Black,
-                                                        fontSize = 14.sp,
-                                                        color = sharesAccent
-                                                    )
-                                                }
-                                                holding.owners.forEach { ownerName ->
-                                                    val isP1 = ownerName.equals(appConfig.person1Name, ignoreCase = true)
-                                                    val col = if (isP1) person1Color else person2Color
-                                                    Surface(
-                                                        shape = RoundedCornerShape(10.dp),
-                                                        color = col.copy(alpha = 0.18f),
-                                                        border = BorderStroke(1.dp, col.copy(alpha = 0.45f))
-                                                    ) {
-                                                        Text(
-                                                            ownerName,
-                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                            fontSize = 10.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = col
-                                                        )
-                                                    }
-                                                }
-                                                Surface(
-                                                    shape = RoundedCornerShape(6.dp),
-                                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-                                                ) {
-                                                    Text(
-                                                        "${holding.parcels.size} ${if (holding.parcels.size == 1) "buy" else "buys"}",
-                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                        fontSize = 10.sp,
-                                                        color = SlateGray,
-                                                        fontWeight = FontWeight.SemiBold
-                                                    )
-                                                }
-                                            }
-                                            Spacer(Modifier.height(3.dp))
-                                            Text(
-                                                "${formatShareUnits(holding.totalUnits)} units held",
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = SlateGray
-                                            )
-                                        }
-                                    }
-
-                                    Column(horizontalAlignment = Alignment.End) {
-                                        Text(
-                                            maskVal(holding.totalMarketValue, 2),
-                                            fontWeight = FontWeight.Black,
-                                            fontSize = 17.sp,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(Modifier.height(2.dp))
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = gainColor.copy(alpha = 0.14f),
-                                            border = BorderStroke(0.8.dp, gainColor.copy(alpha = 0.35f))
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(3.dp)
-                                            ) {
-                                                Icon(
-                                                    if (isGain) Icons.Default.NorthEast else Icons.Default.SouthEast,
-                                                    contentDescription = if (isGain) "Gain" else "Loss",
-                                                    tint = gainColor,
-                                                    modifier = Modifier.size(11.dp)
-                                                )
-                                                Text(
-                                                    if (isWealthHidden) "$ ••••••"
-                                                    else "${if (isGain) "+" else ""}${formatCurrency(holding.totalGainLoss, 2)} (${String.format(Locale.getDefault(), "%.1f", holding.gainLossPct)}%)",
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = if (isWealthHidden) MaterialTheme.colorScheme.onSurface else gainColor
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // MIDDLE TIER: DEDICATED CLEAN DUAL-METRIC PRICING CAPSULE
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                                    border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        // Average Buy Price Block
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(6.dp)
-                                                        .clip(CircleShape)
-                                                        .background(SlateGray.copy(alpha = 0.8f))
-                                                )
-                                                Text(
-                                                    "AVG BUY PRICE",
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = SlateGray,
-                                                    letterSpacing = 0.6.sp
-                                                )
-                                            }
-                                            Spacer(Modifier.height(2.dp))
-                                            Text(
-                                                text = maskVal(holding.averagePurchasePrice, 2),
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            )
-                                        }
-
-                                        // Vertical Divider
-                                        Box(
-                                            modifier = Modifier
-                                                .padding(horizontal = 8.dp)
-                                                .width(1.dp)
-                                                .height(26.dp)
-                                                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
-                                        )
-
-                                        // Current Market Price Block
-                                        Column(
-                                            modifier = Modifier.weight(1.1f),
-                                            horizontalAlignment = Alignment.End
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f).padding(end = 8.dp)
                                         ) {
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                            ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(6.dp)
-                                                        .clip(CircleShape)
-                                                        .background(BrandMintGreen)
-                                                )
-                                                Text(
-                                                    "CURRENT ASX PRICE",
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = sharesAccent,
-                                                    letterSpacing = 0.6.sp
-                                                )
-                                            }
-                                            Spacer(Modifier.height(2.dp))
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                            ) {
-                                                Text(
-                                                    text = if (isWealthHidden) "$ ••••••" else formatCurrency(holding.currentPrice, 2),
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Black,
-                                                    color = sharesAccent
-                                                )
-                                                if (!isWealthHidden && holding.currentPrice > 0 && holding.averagePurchasePrice > 0) {
-                                                    val priceDiffPct = ((holding.currentPrice - holding.averagePurchasePrice) / holding.averagePurchasePrice) * 100
-                                                    val isDiffPos = priceDiffPct >= 0
+                                            AsxShareLogoBadge(ticker = holding.code, size = 38.dp, market = holding.market)
+                                            Spacer(Modifier.width(10.dp))
+                                            Column {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                                ) {
                                                     Surface(
-                                                        shape = RoundedCornerShape(4.dp),
-                                                        color = (if (isDiffPos) BrandMintGreen else BrandCoralPink).copy(alpha = 0.16f)
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        color = sharesAccent.copy(alpha = 0.16f)
                                                     ) {
                                                         Text(
-                                                            text = "${if (isDiffPos) "+" else ""}${String.format(Locale.getDefault(), "%.1f", priceDiffPct)}%",
-                                                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                                                            fontSize = 9.5.sp,
-                                                            fontWeight = FontWeight.Bold,
-                                                            color = if (isDiffPos) BrandMintGreen else BrandCoralPink
+                                                            holding.code.uppercase(),
+                                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                                            fontWeight = FontWeight.Black,
+                                                            fontSize = 14.sp,
+                                                            color = sharesTextAccent
                                                         )
                                                     }
+                                                    if (holding.isUsMarket) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(5.dp),
+                                                            color = BrandPurple.copy(alpha = 0.16f),
+                                                            border = BorderStroke(0.7.dp, BrandPurple.copy(alpha = 0.4f))
+                                                        ) {
+                                                            Text(
+                                                                "US",
+                                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.5.dp),
+                                                                fontSize = 9.sp,
+                                                                fontWeight = FontWeight.ExtraBold,
+                                                                color = marketBadgeColor
+                                                            )
+                                                        }
+                                                    }
+                                                    holding.owners.forEach { ownerName ->
+                                                        val isP1 = ownerName.equals(appConfig.person1Name, ignoreCase = true)
+                                                        val col = if (isP1) person1Color else person2Color
+                                                        Surface(
+                                                            shape = RoundedCornerShape(10.dp),
+                                                            color = col.copy(alpha = 0.18f),
+                                                            border = BorderStroke(1.dp, col.copy(alpha = 0.45f))
+                                                        ) {
+                                                            Text(
+                                                                ownerName,
+                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                                fontSize = 10.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = col
+                                                            )
+                                                        }
+                                                    }
+                                                    Surface(
+                                                        shape = RoundedCornerShape(6.dp),
+                                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
+                                                    ) {
+                                                        Text(
+                                                            "${holding.parcels.size} ${if (holding.parcels.size == 1) "buy" else "buys"}",
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                            fontSize = 10.sp,
+                                                            color = SlateGray,
+                                                            fontWeight = FontWeight.SemiBold
+                                                        )
+                                                    }
+                                                }
+                                                Spacer(Modifier.height(3.dp))
+                                                Text(
+                                                    "${formatShareUnits(holding.totalUnits)} units held",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = SlateGray
+                                                )
+                                            }
+                                        }
+
+                                        Column(horizontalAlignment = Alignment.End) {
+                                            Text(
+                                                maskVal(holding.totalMarketValue, 2),
+                                                fontWeight = FontWeight.Black,
+                                                fontSize = 17.sp,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Spacer(Modifier.height(2.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = gainColor.copy(alpha = 0.14f),
+                                                border = BorderStroke(0.8.dp, gainColor.copy(alpha = 0.35f))
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                                ) {
+                                                    Icon(
+                                                        if (isGain) Icons.Default.NorthEast else Icons.Default.SouthEast,
+                                                        contentDescription = if (isGain) "Gain" else "Loss",
+                                                        tint = gainColor,
+                                                        modifier = Modifier.size(11.dp)
+                                                    )
+                                                    Text(
+                                                        if (isWealthHidden) "$ ••••••"
+                                                        else "${if (isGain) "+" else ""}${formatCurrency(holding.totalGainLoss, 2)} (${String.format(locale, "%.1f", holding.gainLossPct)}%)",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = if (isWealthHidden) MaterialTheme.colorScheme.onSurface else gainColor
+                                                    )
                                                 }
                                             }
                                         }
                                     }
-                                }
 
-                                // BOTTOM TIER: Total Cost Basis & Clickable Graph Affordance
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        "Cost Basis: ${maskVal(holding.totalCostBasis, 2)}",
-                                        fontSize = 11.sp,
-                                        color = SlateGray,
-                                        fontWeight = FontWeight.Medium
-                                    )
+                                    // MIDDLE TIER: DEDICATED CLEAN DUAL-METRIC PRICING CAPSULE (AUD + TINY USD FOR US)
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                                        border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            // Average Buy Price Block (AUD)
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(6.dp)
+                                                            .clip(CircleShape)
+                                                            .background(SlateGray.copy(alpha = 0.8f))
+                                                    )
+                                                    Text(
+                                                        if (holding.isUsMarket) "AVG BUY (AUD)" else "AVG BUY PRICE",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = SlateGray,
+                                                        letterSpacing = 0.6.sp
+                                                    )
+                                                }
+                                                Spacer(Modifier.height(2.dp))
+                                                Text(
+                                                    text = maskVal(holding.averagePurchasePrice, 2),
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                if (holding.isUsMarket && holding.usdAveragePurchasePrice > 0 && !isWealthHidden) {
+                                                    Text(
+                                                        text = formatUsdCurrency(holding.usdAveragePurchasePrice, 2),
+                                                        fontSize = 9.sp,
+                                                        color = SlateGray,
+                                                        fontWeight = FontWeight.Medium
+                                                    )
+                                                }
+                                            }
+
+                                            // Vertical Divider
+                                            Box(
+                                                modifier = Modifier
+                                                    .padding(horizontal = 8.dp)
+                                                    .width(1.dp)
+                                                    .height(if (holding.isUsMarket) 34.dp else 26.dp)
+                                                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                                            )
+
+                                            // Current Market Price Block (AUD + tiny USD share price for US shares)
+                                            Column(
+                                                modifier = Modifier.weight(1.1f),
+                                                horizontalAlignment = Alignment.End
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(6.dp)
+                                                            .clip(CircleShape)
+                                                            .background(BrandMintGreen)
+                                                    )
+                                                    Text(
+                                                        if (holding.isUsMarket) "CURRENT PRICE (AUD)" else "CURRENT ASX PRICE",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = sharesTextAccent,
+                                                        letterSpacing = 0.6.sp
+                                                    )
+                                                }
+                                                Spacer(Modifier.height(2.dp))
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                                ) {
+                                                    Text(
+                                                        text = if (isWealthHidden) "$ ••••••" else formatCurrency(holding.currentPrice, 2),
+                                                        fontSize = 14.sp,
+                                                        fontWeight = FontWeight.Black,
+                                                        color = sharesTextAccent
+                                                    )
+                                                    if (!isWealthHidden && holding.currentPrice > 0 && holding.averagePurchasePrice > 0) {
+                                                        val priceDiffPct = ((holding.currentPrice - holding.averagePurchasePrice) / holding.averagePurchasePrice) * 100
+                                                        val isDiffPos = priceDiffPct >= 0
+                                                        Surface(
+                                                            shape = RoundedCornerShape(4.dp),
+                                                            color = (if (isDiffPos) gainTextColor else lossTextColor).copy(alpha = 0.16f)
+                                                        ) {
+                                                            Text(
+                                                                text = "${if (isDiffPos) "+" else ""}${String.format(locale, "%.1f", priceDiffPct)}%",
+                                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                                                fontSize = 9.5.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = if (isDiffPos) gainTextColor else lossTextColor
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                                if (holding.isUsMarket && holding.usdCurrentPrice > 0 && !isWealthHidden) {
+                                                    Text(
+                                                        text = "${formatUsdCurrency(holding.usdCurrentPrice, 2)} USD",
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = SlateGray
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // BOTTOM TIER: Total Cost Basis & Clickable Graph Affordance
                                     Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            "View Graph & History",
+                                            "Cost Basis: ${maskVal(holding.totalCostBasis, 2)}",
                                             fontSize = 11.sp,
-                                            color = sharesAccent,
-                                            fontWeight = FontWeight.Bold
+                                            color = SlateGray,
+                                            fontWeight = FontWeight.Medium
                                         )
-                                        Icon(
-                                            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                            contentDescription = null,
-                                            tint = sharesAccent,
-                                            modifier = Modifier.size(15.dp)
-                                        )
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            Text(
+                                                "View Graph & History",
+                                                fontSize = 11.sp,
+                                                color = sharesTextAccent,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Icon(
+                                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                                contentDescription = null,
+                                                tint = sharesTextAccent,
+                                                modifier = Modifier.size(15.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -13206,8 +14551,8 @@ fun SuperAndSharesScreen(
             ownerOptions = ownerChoices,
             initialTicker = null,
             onDismiss = { showAddShareDialog = false },
-            onConfirm = { code, owner, units, pPrice, cPrice, date ->
-                onAddShare(code, owner, units, pPrice, cPrice, date)
+            onConfirm = { code, owner, units, pPrice, cPrice, date, market, usdPPrice, usdCPrice, fxRate ->
+                onAddShare(code, owner, units, pPrice, cPrice, date, market, usdPPrice, usdCPrice, fxRate)
                 showAddShareDialog = false
             }
         )
@@ -13219,9 +14564,12 @@ fun SuperAndSharesScreen(
             ownerOptions = ownerChoices,
             initialTicker = holding.code,
             initialCurrentPrice = holding.currentPrice,
+            initialMarket = holding.market,
+            initialUsdCurrentPrice = holding.usdCurrentPrice.takeIf { it > 0 },
+            initialFxRate = holding.fxRate.takeIf { it > 0 },
             onDismiss = { addPurchaseForHolding = null },
-            onConfirm = { code, owner, units, pPrice, cPrice, date ->
-                onAddShare(code, owner, units, pPrice, cPrice, date)
+            onConfirm = { code, owner, units, pPrice, cPrice, date, market, usdPPrice, usdCPrice, fxRate ->
+                onAddShare(code, owner, units, pPrice, cPrice, date, market, usdPPrice, usdCPrice, fxRate)
                 addPurchaseForHolding = null
             }
         )
@@ -13233,10 +14581,208 @@ fun SuperAndSharesScreen(
             ownerOptions = ownerChoices,
             initialTicker = parcel.code,
             initialCurrentPrice = parcel.currentPrice,
+            initialMarket = parcel.market,
             onDismiss = { shareToEdit = null },
-            onConfirm = { code, owner, units, pPrice, cPrice, date ->
-                onEditShare(parcel.id, code, owner, units, pPrice, cPrice, date)
+            onConfirm = { code, owner, units, pPrice, cPrice, date, market, usdPPrice, usdCPrice, fxRate ->
+                onEditShare(parcel.id, code, owner, units, pPrice, cPrice, date, market, usdPPrice, usdCPrice, fxRate)
                 shareToEdit = null
+            }
+        )
+    }
+
+    holdingForParcelPicker?.let { pickedHolding ->
+        val liveHolding = groupedShares.find { it.holdingKey == pickedHolding.holdingKey } ?: pickedHolding
+        AlertDialog(
+            onDismissRequest = { holdingForParcelPicker = null },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    AsxShareLogoBadge(ticker = liveHolding.code, size = 30.dp, market = liveHolding.market)
+                    Column {
+                        Text(
+                            "Edit Individual Buys • ${liveHolding.code}",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 17.sp
+                        )
+                        Text(
+                            "${liveHolding.parcels.size} buys • ${formatShareUnits(liveHolding.totalUnits)} units (${maskVal(liveHolding.totalMarketValue, 2)})",
+                            fontSize = 11.sp,
+                            color = SlateGray
+                        )
+                    }
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    liveHolding.parcels.forEach { parcel ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "${formatParcelDate(parcel)} • ${parcel.owner}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        "${formatShareUnits(parcel.units)} units @ ${maskVal(parcel.purchasePrice, 2)}" +
+                                            if (parcel.market.equals("US", ignoreCase = true) && parcel.usdPurchasePrice > 0 && !isWealthHidden) {
+                                                " (${formatUsdCurrency(parcel.usdPurchasePrice, 2)})"
+                                            } else "",
+                                        fontSize = 11.sp,
+                                        color = SlateGray
+                                    )
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = {
+                                            holdingForParcelPicker = null
+                                            shareToEdit = parcel
+                                        },
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Edit,
+                                            contentDescription = "Edit Buy",
+                                            tint = BrandWarmAmber,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            holdingForParcelPicker = null
+                                            shareToDelete = parcel
+                                        },
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.DeleteOutline,
+                                            contentDescription = "Delete Buy",
+                                            tint = BrandCoralRed,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        holdingForParcelPicker = null
+                        addPurchaseForHolding = liveHolding
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = sharesAccent, contentColor = BrandForestDark)
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add Buy", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { holdingForParcelPicker = null }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+    holdingForDeleteConfirm?.let { delHolding ->
+        AlertDialog(
+            onDismissRequest = { holdingForDeleteConfirm = null },
+            title = { Text("Delete ${delHolding.code}?", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "${delHolding.code} has ${delHolding.parcels.size} individual buys. Delete all ${delHolding.parcels.size} buys or choose a specific buy?",
+                        fontSize = 13.sp,
+                        color = SlateGray
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        delHolding.parcels.forEach { parcel ->
+                            Surface(
+                                onClick = {
+                                    holdingForDeleteConfirm = null
+                                    shareToDelete = parcel
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = BorderStroke(0.8.dp, BrandCoralRed.copy(alpha = 0.35f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            "${formatParcelDate(parcel)} • ${parcel.owner}",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            "${formatShareUnits(parcel.units)} units @ ${maskVal(parcel.purchasePrice, 2)}",
+                                            fontSize = 11.sp,
+                                            color = SlateGray
+                                        )
+                                    }
+                                    Icon(
+                                        Icons.Default.DeleteOutline,
+                                        contentDescription = "Delete Buy",
+                                        tint = BrandCoralRed,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        delHolding.parcels.forEach { onDeleteShare(it.id) }
+                        if (selectedHoldingKey == delHolding.holdingKey) {
+                            selectedHoldingKey = null
+                        }
+                        holdingForDeleteConfirm = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = BrandCoralRed, contentColor = Color.White)
+                ) {
+                    Text("Delete All (${delHolding.parcels.size})", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { holdingForDeleteConfirm = null }) {
+                    Text("Cancel")
+                }
             }
         )
     }
@@ -13535,9 +15081,9 @@ fun OtherAssetsScreen(
 // ============================================================================
 @Composable
 fun SwipeToRevealBox(
+    modifier: Modifier = Modifier,
     onEdit: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
     val actionCount = (if (onEdit != null) 1 else 0) + (if (onDelete != null) 1 else 0)
@@ -14026,8 +15572,9 @@ fun AddCashflowDialog(
         }
     }
 
+    val locale = currentLocale()
     val zoneId = remember { ZoneId.systemDefault() }
-    val dateFormatter = remember { DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()) }
+    val dateFormatter = remember(locale) { DateTimeFormatter.ofPattern("d MMM yyyy", locale) }
 
     var name by remember(initialItem) { mutableStateOf(initialItem?.name ?: "") }
     var selectedCycle by remember(initialItem) {
@@ -14417,6 +15964,7 @@ fun EditLoanConfigDialog(
     onDismiss: () -> Unit,
     onSave: (LoanConfig) -> Unit
 ) {
+    val locale = currentLocale()
     var nameStr by remember { mutableStateOf(loan.name) }
     var startDateStr by remember { mutableStateOf(loan.startDateStr) }
     var rateStr by remember { mutableStateOf(loan.interestRatePa.toString()) }
@@ -14539,7 +16087,7 @@ fun EditLoanConfigDialog(
                             val pickedLocalDate = Instant.ofEpochMilli(pickedUtcMillis)
                                 .atZone(ZoneId.of("UTC"))
                                 .toLocalDate()
-                            startDateStr = pickedLocalDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
+                            startDateStr = pickedLocalDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy", locale))
                         }
                         showStartDatePicker = false
                     }
@@ -14626,40 +16174,111 @@ fun AddEditShareParcelDialog(
     ownerOptions: List<String>,
     initialTicker: String? = null,
     initialCurrentPrice: Double? = null,
+    initialMarket: String? = null,
+    initialUsdCurrentPrice: Double? = null,
+    initialFxRate: Double? = null,
     onDismiss: () -> Unit,
-    onConfirm: (String, String, Double, Double, Double, String) -> Unit
+    onConfirm: (String, String, Double, Double, Double, String, String, Double, Double, Double) -> Unit
 ) {
-    var code by remember { mutableStateOf(parcel?.code ?: initialTicker ?: "VAS") }
-    var owner by remember { mutableStateOf(parcel?.owner ?: ownerOptions.firstOrNull() ?: "Owner") }
-    var unitsStr by remember { mutableStateOf(parcel?.units?.let { if (it % 1.0 == 0.0) it.toInt().toString() else it.toString() } ?: "") }
-    var pPriceStr by remember { mutableStateOf(parcel?.purchasePrice?.let { if (it > 0) String.format(Locale.getDefault(), "%.2f", it) else "" } ?: "") }
-    var cPriceStr by remember {
+    val context = LocalContext.current
+    val isDark = LocalIsDarkTheme.current
+    val locale = currentLocale()
+    val prefs = remember { context.getSharedPreferences("expnz_public_wealth_v2", Context.MODE_PRIVATE) }
+    val initialMkt = (parcel?.market ?: initialMarket ?: "ASX").uppercase().takeIf { it == "US" } ?: "ASX"
+    var market by remember { mutableStateOf(initialMkt) }
+    var enterUsInAud by remember {
         mutableStateOf(
-            parcel?.currentPrice?.let { if (it > 0) String.format(Locale.getDefault(), "%.2f", it) else "" }
-                ?: initialCurrentPrice?.let { if (it > 0) String.format(Locale.getDefault(), "%.2f", it) else "" }
-                ?: ""
+            parcel != null && initialMkt == "US" && parcel.usdPurchasePrice <= 0.0 && parcel.purchasePrice > 0.0
         )
     }
+    var code by remember { mutableStateOf(parcel?.code ?: initialTicker ?: if (initialMkt == "US") "AAPL" else "VAS") }
+    var owner by remember { mutableStateOf(parcel?.owner ?: ownerOptions.firstOrNull() ?: "Owner") }
+    var unitsStr by remember { mutableStateOf(parcel?.units?.let { if (it % 1.0 == 0.0) it.toInt().toString() else it.toString() } ?: "") }
+
+    val savedFx = prefs.getFloat("last_usd_aud_rate", 0f).toDouble()
+    val initFx = when {
+        parcel != null && parcel.fxRateAtSync > 0 -> parcel.fxRateAtSync
+        parcel != null && parcel.usdPurchasePrice > 0 && parcel.purchasePrice > 0 -> parcel.purchasePrice / parcel.usdPurchasePrice
+        initialFxRate != null && initialFxRate > 0 -> initialFxRate
+        savedFx > 0 -> savedFx
+        else -> 1.54
+    }
+    var bgFxRate by remember { mutableDoubleStateOf(initFx) }
+
+    val initPPrice = when {
+        parcel == null -> ""
+        initialMkt == "US" && !enterUsInAud && parcel.usdPurchasePrice > 0 -> String.format(locale, "%.2f", parcel.usdPurchasePrice)
+        initialMkt == "US" && !enterUsInAud && parcel.purchasePrice > 0 -> String.format(locale, "%.2f", parcel.purchasePrice / initFx)
+        parcel.purchasePrice > 0 -> String.format(locale, "%.2f", parcel.purchasePrice)
+        else -> ""
+    }
+    val initCPrice = when {
+        initialMkt == "US" && !enterUsInAud && parcel != null && parcel.usdCurrentPrice > 0 -> String.format(locale, "%.2f", parcel.usdCurrentPrice)
+        initialMkt == "US" && !enterUsInAud && initialUsdCurrentPrice != null && initialUsdCurrentPrice > 0 -> String.format(locale, "%.2f", initialUsdCurrentPrice)
+        initialMkt == "US" && !enterUsInAud && parcel != null && parcel.currentPrice > 0 -> String.format(locale, "%.2f", parcel.currentPrice / initFx)
+        parcel?.currentPrice != null && parcel.currentPrice > 0 -> String.format(locale, "%.2f", parcel.currentPrice)
+        initialCurrentPrice != null && initialCurrentPrice > 0 -> String.format(locale, "%.2f", initialCurrentPrice)
+        else -> ""
+    }
+
+    var pPriceStr by remember { mutableStateOf(initPPrice) }
+    var cPriceStr by remember { mutableStateOf(initCPrice) }
     var purchaseDateStr by remember {
         mutableStateOf(
             parcel?.purchaseDate?.ifBlank { null }?.let { formatDisplayDate(it) }
-                ?: LocalDate.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
+                ?: LocalDate.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy", locale))
         )
     }
     var showPurchaseDatePicker by remember { mutableStateOf(false) }
     var isFetchingPrice by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
+    var fetchStatusMsg by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
-    fun fetchPriceForTicker(ticker: String) {
+    LaunchedEffect(market) {
+        if (market == "US") {
+            val liveFx = fetchUsdToAudRate(context)
+            if (liveFx != null && liveFx > 0.0) {
+                bgFxRate = liveFx
+            }
+        }
+    }
+
+    fun fetchPriceForTicker(ticker: String, targetMarket: String, inAud: Boolean) {
         if (ticker.isBlank()) return
         isFetchingPrice = true
+        fetchStatusMsg = null
         scope.launch {
-            val price = fetchAsxLivePrice(ticker)
-            if (price != null && price > 0.0) {
-                cPriceStr = String.format(Locale.getDefault(), "%.2f", price)
-                if (pPriceStr.isBlank()) {
-                    pPriceStr = cPriceStr
+            val quote = fetchShareLiveQuote(
+                ticker = ticker,
+                market = targetMarket,
+                usdToAudRateOverride = null,
+                context = context
+            )
+            if (quote != null && quote.audPrice > 0.0) {
+                if (targetMarket == "US") {
+                    val usdVal = quote.usdPrice ?: quote.nativePrice
+                    val fxVal = quote.usdToAudRate ?: bgFxRate
+                    bgFxRate = fxVal
+                    val displayVal = if (inAud) quote.audPrice else usdVal
+                    cPriceStr = String.format(locale, "%.2f", displayVal)
+                    if (pPriceStr.isBlank()) {
+                        pPriceStr = cPriceStr
+                    }
+                    fetchStatusMsg = if (inAud) {
+                        "Live ${ticker.uppercase()}: A$${String.format(locale, "%.2f", quote.audPrice)}"
+                    } else {
+                        "Live ${ticker.uppercase()}: ${formatUsdCurrency(usdVal, 2)}"
+                    }
+                } else {
+                    cPriceStr = String.format(locale, "%.2f", quote.audPrice)
+                    if (pPriceStr.isBlank()) {
+                        pPriceStr = cPriceStr
+                    }
+                    fetchStatusMsg = "Live ${ticker.uppercase()}.AX: A$${String.format(locale, "%.2f", quote.audPrice)}"
                 }
+            } else {
+                fetchStatusMsg = "Could not fetch live quote for ${ticker.uppercase()}"
             }
             isFetchingPrice = false
         }
@@ -14669,7 +16288,78 @@ fun AddEditShareParcelDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (parcel == null) "Add Share Purchase" else "Edit Purchase Transaction", fontWeight = FontWeight.Bold) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = market == "ASX",
+                        onClick = {
+                            if (market != "ASX") {
+                                market = "ASX"
+                                if (parcel == null && initialTicker == null && code == "AAPL") code = "VAS"
+                                fetchStatusMsg = null
+                            }
+                        },
+                        label = { Text("ASX", fontWeight = FontWeight.Bold) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = market == "US",
+                        onClick = {
+                            if (market != "US") {
+                                market = "US"
+                                if (parcel == null && initialTicker == null && code == "VAS") code = "AAPL"
+                                fetchStatusMsg = null
+                            }
+                        },
+                        label = { Text("US Shares", fontWeight = FontWeight.Bold) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                if (market == "US") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = !enterUsInAud,
+                            onClick = {
+                                if (enterUsInAud) {
+                                    val fx = bgFxRate.coerceAtLeast(0.01)
+                                    pPriceStr.toDoubleOrNull()?.let { pPriceStr = String.format(locale, "%.2f", it / fx) }
+                                    cPriceStr.toDoubleOrNull()?.let { cPriceStr = String.format(locale, "%.2f", it / fx) }
+                                    enterUsInAud = false
+                                    fetchStatusMsg = null
+                                }
+                            },
+                            label = { Text("Enter in US$", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = enterUsInAud,
+                            onClick = {
+                                if (!enterUsInAud) {
+                                    val fx = bgFxRate.coerceAtLeast(0.01)
+                                    pPriceStr.toDoubleOrNull()?.let { pPriceStr = String.format(locale, "%.2f", it * fx) }
+                                    cPriceStr.toDoubleOrNull()?.let { cPriceStr = String.format(locale, "%.2f", it * fx) }
+                                    enterUsInAud = true
+                                    fetchStatusMsg = null
+                                }
+                            },
+                            label = { Text("Enter in A$", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -14678,17 +16368,22 @@ fun AddEditShareParcelDialog(
                     OutlinedTextField(
                         value = code,
                         onValueChange = { code = it.uppercase() },
-                        label = { Text("ASX Ticker (e.g. VAS, IVV, BHP)") },
+                        label = {
+                            Text(
+                                if (market == "US") "US Ticker (e.g. AAPL, NVDA, VOO)"
+                                else "ASX Ticker (e.g. VAS, IVV, BHP)"
+                            )
+                        },
                         leadingIcon = {
                             Box(modifier = Modifier.padding(start = 6.dp), contentAlignment = Alignment.Center) {
-                                AsxShareLogoBadge(ticker = code, size = 18.dp)
+                                AsxShareLogoBadge(ticker = code, size = 18.dp, market = market)
                             }
                         },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedButton(
-                        onClick = { fetchPriceForTicker(code) },
+                        onClick = { fetchPriceForTicker(code, market, enterUsInAud) },
                         enabled = !isFetchingPrice && code.isNotBlank(),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
                         shape = RoundedCornerShape(10.dp)
@@ -14696,9 +16391,18 @@ fun AddEditShareParcelDialog(
                         if (isFetchingPrice) {
                             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                         } else {
-                            Text("Fetch Live", fontSize = 11.sp, color = BrandCoralPink)
+                            Text("Fetch Live", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (isDark) BrandSkyBlue else Color(0xFF0284C7))
                         }
                     }
+                }
+
+                if (fetchStatusMsg != null) {
+                    Text(
+                        text = fetchStatusMsg!!,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (fetchStatusMsg!!.startsWith("Live")) (if (isDark) BrandMintGreen else Color(0xFF059669)) else BrandCoralRed
+                    )
                 }
 
                 if (ownerOptions.size > 1) {
@@ -14719,10 +16423,11 @@ fun AddEditShareParcelDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
+                val inputCurrencyLabel = if (market == "US" && !enterUsInAud) "US$" else "A$"
                 OutlinedTextField(
                     value = pPriceStr,
                     onValueChange = { pPriceStr = it },
-                    label = { Text("Purchase Price per Share ($)") },
+                    label = { Text("Purchase Price per Share ($inputCurrencyLabel)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
@@ -14731,7 +16436,7 @@ fun AddEditShareParcelDialog(
                 OutlinedTextField(
                     value = cPriceStr,
                     onValueChange = { cPriceStr = it },
-                    label = { Text("Current Price per Share ($)") },
+                    label = { Text("Current Price per Share ($inputCurrencyLabel)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
@@ -14759,7 +16464,7 @@ fun AddEditShareParcelDialog(
                     }
                     OutlinedButton(
                         onClick = {
-                            purchaseDateStr = LocalDate.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
+                            purchaseDateStr = LocalDate.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy", locale))
                         },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 12.dp),
                         shape = RoundedCornerShape(10.dp)
@@ -14771,12 +16476,42 @@ fun AddEditShareParcelDialog(
         },
         confirmButton = {
             Button(
+                enabled = !isSaving,
                 onClick = {
                     val u = unitsStr.toDoubleOrNull() ?: 0.0
-                    val pp = pPriceStr.toDoubleOrNull() ?: 0.0
-                    val cp = cPriceStr.toDoubleOrNull() ?: pp
-                    if (code.isNotBlank() && u > 0) {
-                        onConfirm(code.trim().uppercase(), owner, u, pp, cp, purchaseDateStr.trim())
+                    val rawBuy = pPriceStr.toDoubleOrNull() ?: 0.0
+                    val rawCurr = cPriceStr.toDoubleOrNull() ?: rawBuy
+                    val cleanCode = if (market == "US") code.trim().uppercase().removeSuffix(".US").removeSuffix(".AX") else code.trim().uppercase().removeSuffix(".AX")
+                    if (cleanCode.isNotBlank() && u > 0) {
+                        if (market == "US") {
+                            isSaving = true
+                            scope.launch {
+                                val liveFx = fetchUsdToAudRate(context) ?: bgFxRate
+                                val fx = liveFx.coerceAtLeast(0.01)
+                                bgFxRate = fx
+                                val shouldFetchLivePrice = rawCurr <= 0.0 || parcel == null && cPriceStr.isBlank()
+                                val liveQuote = if (shouldFetchLivePrice) {
+                                    fetchShareLiveQuote(cleanCode, "US", usdToAudRateOverride = fx, context = context)
+                                } else null
+
+                                val audBuy = if (enterUsInAud) rawBuy else rawBuy * fx
+                                val usdBuy = if (enterUsInAud) rawBuy / fx else rawBuy
+                                val audCurr = when {
+                                    liveQuote != null && liveQuote.audPrice > 0.0 && rawCurr <= 0.0 -> liveQuote.audPrice
+                                    enterUsInAud -> rawCurr
+                                    else -> rawCurr * fx
+                                }
+                                val usdCurr = when {
+                                    liveQuote?.usdPrice != null && liveQuote.usdPrice > 0.0 && rawCurr <= 0.0 -> liveQuote.usdPrice
+                                    enterUsInAud -> audCurr / fx
+                                    else -> rawCurr
+                                }
+                                isSaving = false
+                                onConfirm(cleanCode, owner, u, audBuy, audCurr, purchaseDateStr.trim(), market, usdBuy, usdCurr, fx)
+                            }
+                        } else {
+                            onConfirm(cleanCode, owner, u, rawBuy, rawCurr, purchaseDateStr.trim(), market, 0.0, 0.0, 0.0)
+                        }
                     }
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = BrandPurple, contentColor = BrandForestDark)
@@ -14802,7 +16537,7 @@ fun AddEditShareParcelDialog(
                             val pickedLocalDate = Instant.ofEpochMilli(pickedUtcMillis)
                                 .atZone(ZoneId.of("UTC"))
                                 .toLocalDate()
-                            purchaseDateStr = pickedLocalDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy", Locale.getDefault()))
+                            purchaseDateStr = pickedLocalDate.format(DateTimeFormatter.ofPattern("dd/MM/yyyy", locale))
                         }
                         showPurchaseDatePicker = false
                     }
@@ -14974,9 +16709,32 @@ fun formatCurrency(value: Double, decimals: Int = 2): String {
     }
 }
 
+fun formatUsdCurrency(value: Double, decimals: Int = 2, showPlus: Boolean = false): String {
+    val sign = when {
+        value < 0 -> "-"
+        showPlus && value > 0 -> "+"
+        else -> ""
+    }
+    val absVal = abs(value)
+    val formatted = if (decimals == 0) {
+        String.format(Locale.getDefault(), "%,.0f", absVal)
+    } else {
+        String.format(Locale.getDefault(), "%,.${decimals}f", absVal)
+    }
+    return "${sign}US$$formatted"
+}
+
 // ============================================================================
-// ASX LIVE PRICE LOOKUP ENGINE
+// ASX & US LIVE PRICE + USD/AUD FX LOOKUP ENGINE
 // ============================================================================
+data class LiveShareQuote(
+    val audPrice: Double,
+    val nativePrice: Double,
+    val usdPrice: Double?,
+    val usdToAudRate: Double?,
+    val market: String
+)
+
 val sampleAsxLivePrices = mapOf(
     "VAS" to 108.57,
     "IVV" to 524.30,
@@ -15003,7 +16761,169 @@ val sampleAsxLivePrices = mapOf(
     "HLI" to 3.80
 )
 
-suspend fun fetchAsxLivePrice(ticker: String): Double? = withContext(Dispatchers.IO) {
+private const val BROWSER_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+
+private fun fetchYahooChartMetaPrice(symbol: String): Pair<Double, String?>? {
+    val hosts = listOf("query1.finance.yahoo.com", "query2.finance.yahoo.com")
+    val encodedSymbol = java.net.URLEncoder.encode(symbol, "UTF-8")
+    for (host in hosts) {
+        try {
+            val url = URL("https://$host/v8/finance/chart/$encodedSymbol?interval=1d&range=5d")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Accept-Language", "en-US,en;q=0.9")
+            }
+            if (conn.responseCode == 200) {
+                val responseText = conn.inputStream.bufferedReader().use { it.readText() }
+                val json = JSONObject(responseText)
+                val result = json.optJSONObject("chart")?.optJSONArray("result")
+                if (result != null && result.length() > 0) {
+                    val meta = result.getJSONObject(0).optJSONObject("meta")
+                    val regPrice = meta?.optDouble("regularMarketPrice", Double.NaN)
+                        ?.takeIf { !it.isNaN() && it > 0.0 }
+                        ?: meta?.optDouble("chartPreviousClose", Double.NaN)
+                            ?.takeIf { !it.isNaN() && it > 0.0 }
+                    val currency = meta?.optString("currency", "")?.uppercase()?.takeIf { it.isNotBlank() }
+                    if (regPrice != null) {
+                        return regPrice to currency
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+    }
+    return null
+}
+
+private fun fetchNasdaqLivePriceUsd(cleanCode: String): Double? {
+    val assetClasses = listOf("stocks", "etf")
+    for (assetClass in assetClasses) {
+        try {
+            val encoded = java.net.URLEncoder.encode(cleanCode, "UTF-8")
+            val url = URL("https://api.nasdaq.com/api/quote/$encoded/info?assetclass=$assetClass")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 6000
+                readTimeout = 6000
+                setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+                setRequestProperty("Accept", "application/json, text/plain, */*")
+                setRequestProperty("Origin", "https://www.nasdaq.com")
+                setRequestProperty("Referer", "https://www.nasdaq.com/")
+            }
+            if (conn.responseCode == 200) {
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                val data = JSONObject(text).optJSONObject("data")
+                val priceStr = data?.optJSONObject("primaryData")?.optString("lastSalePrice", "")
+                    .orEmpty()
+                    .replace("$", "")
+                    .replace(",", "")
+                    .trim()
+                val parsed = priceStr.toDoubleOrNull()
+                if (parsed != null && parsed > 0.0) {
+                    return parsed
+                }
+            }
+        } catch (_: Exception) {}
+    }
+    return null
+}
+
+suspend fun fetchUsdToAudRate(context: Context? = null): Double? = withContext(Dispatchers.IO) {
+    val prefs = context?.getSharedPreferences("expnz_public_wealth_v2", Context.MODE_PRIVATE)
+    var rate: Double? = null
+
+    val usdAud = fetchYahooChartMetaPrice("USDAUD=X")?.first
+    if (usdAud != null && usdAud in 0.5..4.0) {
+        rate = usdAud
+    }
+
+    if (rate == null) {
+        val audUsd = fetchYahooChartMetaPrice("AUDUSD=X")?.first
+        if (audUsd != null && audUsd in 0.25..2.0) {
+            rate = 1.0 / audUsd
+        }
+    }
+
+    if (rate == null) {
+        try {
+            val url = URL("https://open.er-api.com/v6/latest/USD")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+            }
+            if (conn.responseCode == 200) {
+                val text = conn.inputStream.bufferedReader().use { it.readText() }
+                val aud = JSONObject(text).optJSONObject("rates")?.optDouble("AUD", Double.NaN)
+                if (aud != null && !aud.isNaN() && aud in 0.5..4.0) {
+                    rate = aud
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    if (rate != null && rate > 0.0) {
+        prefs?.edit { putFloat("last_usd_aud_rate", rate.toFloat()) }
+        return@withContext rate
+    }
+
+    val cached = prefs?.getFloat("last_usd_aud_rate", 0f)?.toDouble() ?: 0.0
+    return@withContext cached.takeIf { it in 0.5..4.0 }
+}
+
+suspend fun fetchShareLiveQuote(
+    ticker: String,
+    market: String = "ASX",
+    usdToAudRateOverride: Double? = null,
+    context: Context? = null
+): LiveShareQuote? = withContext(Dispatchers.IO) {
+    val cleanMarket = market.trim().uppercase().takeIf { it == "US" } ?: "ASX"
+    if (cleanMarket == "US") {
+        val cleanCode = ticker.trim().uppercase().removeSuffix(".US").removeSuffix(".AX")
+        if (cleanCode.isBlank()) return@withContext null
+
+        val candidateSymbols = listOfNotNull(
+            cleanCode,
+            cleanCode.replace('.', '-').takeIf { it != cleanCode }
+        )
+        var quotePair: Pair<Double, String?>? = null
+        for (sym in candidateSymbols) {
+            quotePair = fetchYahooChartMetaPrice(sym)
+            if (quotePair != null) break
+        }
+        if (quotePair == null) {
+            val nasdaqPrice = fetchNasdaqLivePriceUsd(cleanCode)
+                ?: cleanCode.replace('-', '.').takeIf { it != cleanCode }?.let { fetchNasdaqLivePriceUsd(it) }
+            if (nasdaqPrice != null && nasdaqPrice > 0.0) {
+                quotePair = nasdaqPrice to "USD"
+            }
+        }
+        val (nativePrice, currency) = quotePair ?: return@withContext null
+        val fx = usdToAudRateOverride ?: fetchUsdToAudRate(context) ?: 1.54
+        return@withContext if (currency == "AUD") {
+            LiveShareQuote(
+                audPrice = nativePrice,
+                nativePrice = nativePrice,
+                usdPrice = nativePrice / fx,
+                usdToAudRate = fx,
+                market = "US"
+            )
+        } else {
+            LiveShareQuote(
+                audPrice = nativePrice * fx,
+                nativePrice = nativePrice,
+                usdPrice = nativePrice,
+                usdToAudRate = fx,
+                market = "US"
+            )
+        }
+    }
+
     val cleanCode = ticker.trim().uppercase().replace(".AX", "")
     if (cleanCode.isBlank()) return@withContext null
 
@@ -15013,40 +16933,42 @@ suspend fun fetchAsxLivePrice(ticker: String): Double? = withContext(Dispatchers
             requestMethod = "GET"
             connectTimeout = 6000
             readTimeout = 6000
-            setRequestProperty("User-Agent", "Mozilla/5.0")
+            setRequestProperty("User-Agent", BROWSER_USER_AGENT)
             setRequestProperty("Accept", "application/json")
         }
         if (conn.responseCode == 200) {
             val responseText = conn.inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(responseText)
             val lastPrice = json.optDouble("last_price", Double.NaN)
-            if (!lastPrice.isNaN() && lastPrice > 0.0) return@withContext lastPrice
-        }
-    } catch (_: Exception) {}
-
-    val symbol = "$cleanCode.AX"
-    try {
-        val url = URL("https://query1.finance.yahoo.com/v8/finance/chart/$symbol?interval=1d&range=1d")
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 6000
-            readTimeout = 6000
-            setRequestProperty("User-Agent", "Mozilla/5.0")
-            setRequestProperty("Accept", "application/json")
-        }
-        if (conn.responseCode == 200) {
-            val responseText = conn.inputStream.bufferedReader().use { it.readText() }
-            val json = JSONObject(responseText)
-            val result = json.optJSONObject("chart")?.optJSONArray("result")
-            if (result != null && result.length() > 0) {
-                val meta = result.getJSONObject(0).optJSONObject("meta")
-                val regPrice = meta?.optDouble("regularMarketPrice", Double.NaN)
-                if (regPrice != null && !regPrice.isNaN() && regPrice > 0.0) return@withContext regPrice
+            if (!lastPrice.isNaN() && lastPrice > 0.0) {
+                return@withContext LiveShareQuote(
+                    audPrice = lastPrice,
+                    nativePrice = lastPrice,
+                    usdPrice = null,
+                    usdToAudRate = null,
+                    market = "ASX"
+                )
             }
         }
     } catch (_: Exception) {}
 
-    return@withContext sampleAsxLivePrices[cleanCode]
+    val yahooAsx = fetchYahooChartMetaPrice("$cleanCode.AX")?.first
+    if (yahooAsx != null && yahooAsx > 0.0) {
+        return@withContext LiveShareQuote(
+            audPrice = yahooAsx,
+            nativePrice = yahooAsx,
+            usdPrice = null,
+            usdToAudRate = null,
+            market = "ASX"
+        )
+    }
+
+    return@withContext null
+}
+
+suspend fun fetchAsxLivePrice(ticker: String): Double? = withContext(Dispatchers.IO) {
+    val cleanCode = ticker.trim().uppercase().replace(".AX", "")
+    fetchShareLiveQuote(cleanCode, "ASX")?.audPrice ?: sampleAsxLivePrices[cleanCode]
 }
 
 // ============================================================================
@@ -15194,63 +17116,117 @@ private val asxKnownCompanyDomains = mapOf(
     "SUL" to "superretailgroup.com.au"
 )
 
-private fun downloadLogoBitmap(urlStr: String): android.graphics.Bitmap? {
+private fun downloadLogoBitmapWithUserAgent(urlStr: String, userAgent: String): Pair<Int, android.graphics.Bitmap?> {
     return try {
-        val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 4500
-            readTimeout = 4500
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "Mozilla/5.0")
+        var currentUrl = urlStr
+        var conn: HttpURLConnection? = null
+        for (i in 0..3) {
+            conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 5000
+                readTimeout = 5000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", userAgent)
+                setRequestProperty("Accept", "image/png,image/jpeg,image/webp,image/*,*/*")
+            }
+            val code = conn.responseCode
+            if (code in 300..399) {
+                val loc = conn.getHeaderField("Location") ?: break
+                currentUrl = URL(URL(currentUrl), loc).toString()
+                conn.disconnect()
+            } else {
+                break
+            }
         }
-        if (conn.responseCode in 200..299) {
-            val bytes = conn.inputStream.use { it.readBytes() }
+        val finalConn = conn ?: return 0 to null
+        val code = finalConn.responseCode
+        if (code in 200..299) {
+            val contentType = finalConn.contentType.orEmpty().lowercase()
+            if (contentType.contains("svg") || contentType.contains("html") || contentType.contains("json")) {
+                finalConn.disconnect()
+                return code to null
+            }
+            val bytes = finalConn.inputStream.use { it.readBytes() }
+            finalConn.disconnect()
             if (bytes.isNotEmpty()) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                if (bmp != null && bmp.width > 1 && bmp.height > 1) bmp else null
-            } else null
-        } else null
+                if (bmp != null && bmp.width >= 16 && bmp.height >= 16) code to bmp else code to null
+            } else code to null
+        } else {
+            finalConn.disconnect()
+            code to null
+        }
     } catch (_: Exception) {
-        null
+        0 to null
     }
+}
+
+private fun downloadLogoBitmap(urlStr: String): android.graphics.Bitmap? {
+    // MarketIndex & Cloudflare-fronted CDNs allow "Mozilla/5.0 (Android)" while rejecting desktop Chrome TLS/UA mismatches.
+    val (code, bmp) = downloadLogoBitmapWithUserAgent(urlStr, "Mozilla/5.0 (Android)")
+    if (bmp != null) return bmp
+    if (code == 403 || code == 401 || code == 0) {
+        val (_, retryBmp) = downloadLogoBitmapWithUserAgent(urlStr, BROWSER_USER_AGENT)
+        if (retryBmp != null) return retryBmp
+    }
+    return null
 }
 
 private fun resolveDynamicDomainForAsx(cleanCode: String): String? {
     asxKnownCompanyDomains[cleanCode]?.let { return it }
 
-    // 1. Try Yahoo Finance quoteSummary assetProfile website
+    // 1. Yahoo Finance search for "<TICKER>.AX" (crumb-free) -> Clearbit domain autocomplete
     try {
-        val url = URL("https://query1.finance.yahoo.com/v10/finance/quoteSummary/$cleanCode.AX?modules=assetProfile")
+        val sym = java.net.URLEncoder.encode("$cleanCode.AX", "UTF-8")
+        val url = URL("https://query2.finance.yahoo.com/v1/finance/search?q=$sym&quotesCount=3")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 4000
             readTimeout = 4000
-            setRequestProperty("User-Agent", "Mozilla/5.0")
+            setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+            setRequestProperty("Accept", "application/json")
         }
         if (conn.responseCode == 200) {
             val text = conn.inputStream.bufferedReader().use { it.readText() }
-            val website = JSONObject(text)
-                .optJSONObject("quoteSummary")
-                ?.optJSONArray("result")
-                ?.optJSONObject(0)
-                ?.optJSONObject("assetProfile")
-                ?.optString("website", "")
-                .orEmpty()
-            if (website.isNotBlank()) {
-                val host = runCatching { URL(website).host.removePrefix("www.") }.getOrNull()
-                if (!host.isNullOrBlank()) return host
+            val quotes = JSONObject(text).optJSONArray("quotes")
+            if (quotes != null && quotes.length() > 0) {
+                val first = quotes.getJSONObject(0)
+                val companyName = first.optString("longname", "").ifBlank { first.optString("shortname", "") }
+                if (companyName.isNotBlank()) {
+                    val cleanedQuery = companyName
+                        .replace(Regex("(?i)\\b(LIMITED|LTD\\.?|GROUP|HOLDINGS|CORP\\.?|CORPORATION|PLC|TRUST|ETF|FUND)\\b"), "")
+                        .replace(",", "")
+                        .trim()
+                    if (cleanedQuery.isNotBlank()) {
+                        val encoded = java.net.URLEncoder.encode(cleanedQuery, "UTF-8")
+                        val cbUrl = URL("https://autocomplete.clearbit.com/v1/companies/suggest?query=$encoded")
+                        val cbConn = (cbUrl.openConnection() as HttpURLConnection).apply {
+                            requestMethod = "GET"
+                            connectTimeout = 4000
+                            readTimeout = 4000
+                            setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+                        }
+                        if (cbConn.responseCode == 200) {
+                            val cbArr = JSONArray(cbConn.inputStream.bufferedReader().use { it.readText() })
+                            if (cbArr.length() > 0) {
+                                val domain = cbArr.getJSONObject(0).optString("domain", "")
+                                if (domain.isNotBlank()) return domain
+                            }
+                        }
+                    }
+                }
             }
         }
     } catch (_: Exception) {}
 
-    // 2. Try ASX public company header endpoint + Clearbit domain autocomplete
+    // 2. Fallback: ASX company endpoint + Clearbit domain autocomplete
     try {
         val asxUrl = URL("https://www.asx.com.au/asx/1/share/$cleanCode")
         val conn = (asxUrl.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 4000
             readTimeout = 4000
-            setRequestProperty("User-Agent", "Mozilla/5.0")
+            setRequestProperty("User-Agent", "Mozilla/5.0 (Android)")
             setRequestProperty("Accept", "application/json")
         }
         if (conn.responseCode == 200) {
@@ -15268,7 +17244,7 @@ private fun resolveDynamicDomainForAsx(cleanCode: String): String? {
                         requestMethod = "GET"
                         connectTimeout = 4000
                         readTimeout = 4000
-                        setRequestProperty("User-Agent", "Mozilla/5.0")
+                        setRequestProperty("User-Agent", "Mozilla/5.0 (Android)")
                     }
                     if (cbConn.responseCode == 200) {
                         val cbArr = JSONArray(cbConn.inputStream.bufferedReader().use { it.readText() })
@@ -15286,37 +17262,166 @@ private fun resolveDynamicDomainForAsx(cleanCode: String): String? {
     return null
 }
 
-suspend fun fetchAsxShareLogoBitmap(context: Context, ticker: String): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
-    val cleanCode = ticker.trim().uppercase().replace(".AX", "")
-    if (cleanCode.isBlank() || cleanCode.length > 6) return@withContext null
+private val usKnownCompanyDomains = mapOf(
+    "AAPL" to "apple.com",
+    "MSFT" to "microsoft.com",
+    "NVDA" to "nvidia.com",
+    "GOOGL" to "abc.xyz",
+    "GOOG" to "abc.xyz",
+    "AMZN" to "amazon.com",
+    "META" to "meta.com",
+    "TSLA" to "tesla.com",
+    "NFLX" to "netflix.com",
+    "AMD" to "amd.com",
+    "INTC" to "intel.com",
+    "AVGO" to "broadcom.com",
+    "ORCL" to "oracle.com",
+    "CRM" to "salesforce.com",
+    "ADBE" to "adobe.com",
+    "UBER" to "uber.com",
+    "SHOP" to "shopify.com",
+    "PLTR" to "palantir.com",
+    "COIN" to "coinbase.com",
+    "HOOD" to "robinhood.com",
+    "V" to "visa.com",
+    "MA" to "mastercard.com",
+    "JPM" to "jpmorganchase.com",
+    "BRK-B" to "berkshirehathaway.com",
+    "BRK.B" to "berkshirehathaway.com",
+    "COST" to "costco.com",
+    "WMT" to "walmart.com",
+    "DIS" to "thewaltdisneycompany.com",
+    "KO" to "coca-colacompany.com",
+    "PEP" to "pepsico.com",
+    "NKE" to "nike.com",
+    "SBUX" to "starbucks.com",
+    "VOO" to "vanguard.com",
+    "VTI" to "vanguard.com",
+    "VUG" to "vanguard.com",
+    "VGT" to "vanguard.com",
+    "VT" to "vanguard.com",
+    "VXUS" to "vanguard.com",
+    "SCHD" to "schwab.com",
+    "SPY" to "ssga.com",
+    "QQQ" to "invesco.com",
+    "IVV" to "blackrock.com",
+    "TSM" to "tsmc.com",
+    "ARM" to "arm.com",
+    "SMCI" to "supermicro.com",
+    "SNOW" to "snowflake.com",
+    "NET" to "cloudflare.com",
+    "SPOT" to "spotify.com",
+    "RBLX" to "roblox.com",
+    "SOFI" to "sofi.com",
+    "PYPL" to "paypal.com",
+    "XYZ" to "block.xyz",
+    "SQ" to "block.xyz"
+)
 
-    shareLogoMemoryCache[cleanCode]?.let { return@withContext it }
+private fun resolveDynamicDomainForUs(cleanCode: String): String? {
+    usKnownCompanyDomains[cleanCode]?.let { return it }
 
-    val cacheDir = java.io.File(context.cacheDir, "share_logos").apply { if (!exists()) mkdirs() }
-    val diskFile = java.io.File(cacheDir, "${cleanCode}.png")
+    // 1. Yahoo Finance search (crumb-free) -> Clearbit autocomplete
+    try {
+        val sym = java.net.URLEncoder.encode(cleanCode.replace('.', '-'), "UTF-8")
+        val url = URL("https://query2.finance.yahoo.com/v1/finance/search?q=$sym&quotesCount=3")
+        val conn = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 4000
+            readTimeout = 4000
+            setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+            setRequestProperty("Accept", "application/json")
+        }
+        if (conn.responseCode == 200) {
+            val text = conn.inputStream.bufferedReader().use { it.readText() }
+            val quotes = JSONObject(text).optJSONArray("quotes")
+            if (quotes != null && quotes.length() > 0) {
+                val first = quotes.getJSONObject(0)
+                val companyName = first.optString("longname", "").ifBlank { first.optString("shortname", "") }
+                if (companyName.isNotBlank()) {
+                    val cleanedQuery = companyName
+                        .replace(Regex("(?i)\\b(INC\\.?|CORP\\.?|CORPORATION|LIMITED|LTD\\.?|PLC|HOLDINGS|GROUP|CO\\.?|ETF|TRUST)\\b"), "")
+                        .replace(",", "")
+                        .trim()
+                    if (cleanedQuery.isNotBlank()) {
+                        val encoded = java.net.URLEncoder.encode(cleanedQuery, "UTF-8")
+                        val cbUrl = URL("https://autocomplete.clearbit.com/v1/companies/suggest?query=$encoded")
+                        val cbConn = (cbUrl.openConnection() as HttpURLConnection).apply {
+                            requestMethod = "GET"
+                            connectTimeout = 4000
+                            readTimeout = 4000
+                            setRequestProperty("User-Agent", BROWSER_USER_AGENT)
+                        }
+                        if (cbConn.responseCode == 200) {
+                            val cbArr = JSONArray(cbConn.inputStream.bufferedReader().use { it.readText() })
+                            if (cbArr.length() > 0) {
+                                val domain = cbArr.getJSONObject(0).optString("domain", "")
+                                if (domain.isNotBlank()) return domain
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch (_: Exception) {}
+
+    return null
+}
+
+suspend fun fetchAsxShareLogoBitmap(
+    context: Context,
+    ticker: String,
+    market: String = "ASX"
+): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+    val cleanMarket = market.trim().uppercase().takeIf { it == "US" } ?: "ASX"
+    val cleanCode = if (cleanMarket == "US") {
+        ticker.trim().uppercase().removeSuffix(".US").removeSuffix(".AX")
+    } else {
+        ticker.trim().uppercase().replace(".AX", "")
+    }
+    if (cleanCode.isBlank() || cleanCode.length > 10) return@withContext null
+
+    val cacheKey = "${cleanMarket}_$cleanCode"
+    shareLogoMemoryCache[cacheKey]?.let { return@withContext it }
+
+    val cacheDir = java.io.File(context.cacheDir, "share_logos_v3").apply { if (!exists()) mkdirs() }
+    val diskFile = java.io.File(cacheDir, "${cacheKey}.png")
     if (diskFile.exists() && diskFile.length() > 0) {
         val diskBmp = runCatching { BitmapFactory.decodeFile(diskFile.absolutePath) }.getOrNull()
-        if (diskBmp != null) {
-            shareLogoMemoryCache[cleanCode] = diskBmp
+        if (diskBmp != null && diskBmp.width >= 16 && diskBmp.height >= 16) {
+            shareLogoMemoryCache[cacheKey] = diskBmp
             return@withContext diskBmp
         }
     }
 
-    val candidateUrls = mutableListOf(
-        "https://files.marketindex.com.au/xasx/96x96-png/${cleanCode.lowercase()}.png",
-        "https://storage.googleapis.com/iexcloud-hl37opg/api/logos/$cleanCode.AX.png"
-    )
-
-    val domain = resolveDynamicDomainForAsx(cleanCode)
-    if (!domain.isNullOrBlank()) {
-        candidateUrls.add("https://www.google.com/s2/favicons?domain=$domain&sz=128")
-        candidateUrls.add("https://icons.duckduckgo.com/ip3/$domain.ico")
+    val candidateUrls = if (cleanMarket == "US") {
+        val list = mutableListOf(
+            "https://financialmodelingprep.com/image-stock/$cleanCode.png",
+            "https://financialmodelingprep.com/image-stock/${cleanCode.replace('.', '-')}.png"
+        )
+        val domain = resolveDynamicDomainForUs(cleanCode)
+        if (!domain.isNullOrBlank()) {
+            list.add("https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://$domain&size=128")
+            list.add("https://www.google.com/s2/favicons?domain=$domain&sz=128")
+        }
+        list.add("https://assets.parqet.com/logos/symbol/$cleanCode?format=png")
+        list
+    } else {
+        val list = mutableListOf(
+            "https://files.marketindex.com.au/xasx/96x96-png/${cleanCode.lowercase()}.png"
+        )
+        val domain = resolveDynamicDomainForAsx(cleanCode)
+        if (!domain.isNullOrBlank()) {
+            list.add("https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://$domain&size=128")
+            list.add("https://www.google.com/s2/favicons?domain=$domain&sz=128")
+        }
+        list
     }
 
-    for (urlStr in candidateUrls) {
+    for (urlStr in candidateUrls.distinct()) {
         val bmp = downloadLogoBitmap(urlStr)
         if (bmp != null) {
-            shareLogoMemoryCache[cleanCode] = bmp
+            shareLogoMemoryCache[cacheKey] = bmp
             runCatching {
                 java.io.FileOutputStream(diskFile).use { out ->
                     bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
@@ -15332,15 +17437,21 @@ suspend fun fetchAsxShareLogoBitmap(context: Context, ticker: String): android.g
 @Composable
 fun AsxShareLogoBadge(
     ticker: String,
-    size: Dp = 35.dp
+    size: Dp = 35.dp,
+    market: String = "ASX"
 ) {
     val context = LocalContext.current
-    val cleanCode = remember(ticker) { ticker.trim().uppercase().replace(".AX", "") }
-    var logoBitmap by remember(cleanCode) { mutableStateOf(shareLogoMemoryCache[cleanCode]) }
+    val cleanMarket = remember(market) { market.trim().uppercase().takeIf { it == "US" } ?: "ASX" }
+    val cleanCode = remember(ticker, cleanMarket) {
+        if (cleanMarket == "US") ticker.trim().uppercase().removeSuffix(".US").removeSuffix(".AX")
+        else ticker.trim().uppercase().replace(".AX", "")
+    }
+    val cacheKey = "${cleanMarket}_$cleanCode"
+    var logoBitmap by remember(cacheKey) { mutableStateOf(shareLogoMemoryCache[cacheKey]) }
 
-    LaunchedEffect(cleanCode) {
+    LaunchedEffect(cacheKey) {
         if (cleanCode.isNotBlank() && logoBitmap == null) {
-            logoBitmap = fetchAsxShareLogoBitmap(context, cleanCode)
+            logoBitmap = fetchAsxShareLogoBitmap(context, cleanCode, cleanMarket)
         }
     }
 
@@ -15786,11 +17897,12 @@ fun FloatingAiAssistantWidget(
                             }
                         }
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(solidAiBg)
-                    ) {
+                    CompositionLocalProvider(LocalContentColor provides Color.White) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(solidAiBg)
+                        ) {
                         // 1. Professional Chatbot Header (Ultra Dark Green)
                         Row(
                             modifier = Modifier
@@ -16415,6 +18527,7 @@ fun FloatingAiAssistantWidget(
                                 }
                             }
                         }
+                    }
                     }
                 }
             }
