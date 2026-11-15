@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.expnz20"
+    namespace = "com.aaqilpulle.coinlens"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.example.expnz20"
+        applicationId = "com.aaqilpulle.coinlens"
         minSdk = 26
         targetSdk = 35
         versionCode = 1

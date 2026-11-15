@@ -7,17 +7,17 @@
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:779846601476:android:69ff3a07b260703b765e51",
+        "mobilesdk_app_id": "1:779846601476:android:410353c79218c738765e51",
         "android_client_info": {
-          "package_name": "com.example.expnz20"
+          "package_name": "com.aaqilpulle.coinlens"
         }
       },
       "oauth_client": [
         {
-          "client_id": "779846601476-iiict2s1uv71sjcfsue2hiicfo5i1vvm.apps.googleusercontent.com",
+          "client_id": "779846601476-51d8cgt4gsri6b2ctaakgflt29ej5pc5.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
-            "package_name": "com.example.expnz20",
+            "package_name": "com.aaqilpulle.coinlens",
             "certificate_hash": "e976949423c0eecec216a3fe0aa22811cd16fd7a"
           }
         },

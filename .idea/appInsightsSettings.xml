@@ -8,8 +8,8 @@
             <InsightsFilterSettings>
               <option name="connection">
                 <ConnectionSetting>
-                  <option name="appId" value="com.example.expnz20" />
-                  <option name="mobileSdkAppId" value="1:779846601476:android:69ff3a07b260703b765e51" />
+                  <option name="appId" value="com.aaqilpulle.coinlens" />
+                  <option name="mobileSdkAppId" value="1:779846601476:android:410353c79218c738765e51" />
                   <option name="projectId" value="com-example-expnz20-c6ba0" />
                   <option name="projectNumber" value="779846601476" />
                 </ConnectionSetting>
