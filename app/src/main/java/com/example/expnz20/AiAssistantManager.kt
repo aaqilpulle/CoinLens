@@ -95,6 +95,8 @@ data class SubscriptionLeak(
     val monthlyAmount: Double,
     val annualImpact: Double,
     val category: String,
+    val leakType: String = "SUBSCRIPTION",
+    val recommendation: String = "Review usage or negotiate a better rate",
 )
 
 fun cleanMarkdownText(raw: String): String {
@@ -296,6 +298,8 @@ object AiAssistantManager {
                 append("- Profile: [[ACTION:UPDATE_PROFILE|person1Name=Alex|person2Name=Sam|isCoupleMode=true]]\n")
                 append("- Remember Fact: [[ACTION:REMEMBER_FACT|category=Goals|fact=Targeting $100k ETF portfolio by 2027]] (categories: Goals, History, Preferences, Personal, Financial, Milestones)\n")
                 append("- Forget Fact: [[ACTION:FORGET_FACT|query=Targeting $100k]]\n\n")
+                append("FINANCIAL COMPLIANCE & ADVICE GUARDRAILS (CRITICAL):\n")
+                append("You provide general factual financial education, mathematical projections, and scenario comparisons only. You NEVER provide personal financial product advice. Specifically, you MUST NEVER recommend, endorse, or advise the user to buy, sell, hold, or switch to any specific financial product, security, or provider—for example, NEVER tell a user to buy a specific ASX/US ticker (e.g. VAS, VGS, NDQ) or switch to a specific superannuation fund (e.g. AustralianSuper, ART). When discussing shares, super, mortgages, or investments, always speak objectively in terms of general asset classes, broad diversification principles, mathematical compound return examples, or fee trade-offs, and explicitly advise the user to consult a licensed financial advisor or consider their own Product Disclosure Statement (PDS) before making product-level decisions.\n\n")
                 append("RULES: 1 yr = 52 wks. Monthly = weekly * 52 / 12. Be concise, direct, sharp, and warm. No markdown asterisks or hashes.\n\n")
 
                 if (learnedFacts.isNotEmpty() || userProfileSummary.isNotBlank() || longTermConversationDigest.isNotBlank()) {
@@ -448,13 +452,15 @@ object AiAssistantManager {
     suspend fun detectSubscriptionLeaks(expensesContext: String): List<SubscriptionLeak> = withContext(Dispatchers.IO) {
         if (expensesContext.isBlank()) return@withContext emptyList()
         val prompt = """
-            Analyze this list of past expenses and bank statements: "$expensesContext".
-            Scan for recurring subscriptions, hidden memberships, streaming services, or duplicate charges.
+            Analyze this list of recurring expenses and bills: "$expensesContext".
+            Scan for recurring subscriptions, memberships, streaming services, duplicate/overlapping charges, or overpriced utilities/insurance that could be negotiated.
             Return ONLY a valid JSON array of objects with these exact keys:
-            - "merchant": string (e.g. "Netflix", "Gym Membership")
+            - "merchant": string (exact item name, e.g. "Netflix", "Gym Membership")
             - "monthlyAmount": number (estimated monthly cost)
             - "annualImpact": number (monthlyAmount * 12)
-            - "category": string (e.g. "Subscription", "Entertainment", "Fitness")
+            - "category": string (e.g. "Streaming", "Fitness", "Software", "Utility", "Insurance", "Subscription")
+            - "leakType": string ("DUPLICATE", "NEGOTIABLE", "HIGH_COST", or "SUBSCRIPTION")
+            - "recommendation": string (concise 1-line actionable tip, e.g. "Overlaps with other streaming; consider rotating monthly" or "Shop around annually to save 15-20%")
             No markdown formatting, no backticks, just the raw JSON array. If none found, return [].
         """.trimIndent()
 
@@ -479,6 +485,8 @@ object AiAssistantManager {
                             monthlyAmount = monthly,
                             annualImpact = obj.optDouble("annualImpact", monthly * 12.0),
                             category = obj.optString("category", "Subscription"),
+                            leakType = obj.optString("leakType", "SUBSCRIPTION"),
+                            recommendation = obj.optString("recommendation", "Review recurring charge or negotiate rate"),
                         ),
                     )
                 }
@@ -492,5 +500,47 @@ object AiAssistantManager {
             }
         }
         return@withContext emptyList()
+    }
+
+    suspend fun generateSubscriptionActionScript(
+        merchant: String,
+        monthlyAmount: Double,
+        categoryTag: String,
+        actionType: String, // "NEGOTIATE" or "CANCEL"
+    ): String = withContext(Dispatchers.IO) {
+        val formattedMonthly = String.format(Locale.US, "$%.2f/mo", monthlyAmount)
+        val prompt = if (actionType == "NEGOTIATE") {
+            """
+            Write a short, polite, high-converting retention/discount message (under 90 words) that an Australian consumer can send via live chat or say over the phone to "$merchant" ($categoryTag, currently $formattedMonthly) to request a loyalty discount, price match, or lower tier.
+            Plain text only, no markdown symbols.
+            """.trimIndent()
+        } else {
+            """
+            Write a short, polite, clear cancellation request email/chat message (under 85 words) for "$merchant" ($categoryTag, currently $formattedMonthly) asking to cancel immediately without auto-renewal and confirm via email.
+            Plain text only, no markdown symbols.
+            """.trimIndent()
+        }
+
+        val candidates = getModelCandidates()
+        for (modelName in candidates) {
+            try {
+                val aiModel = Firebase.ai.generativeModel(
+                    modelName = modelName,
+                    generationConfig = createFastChatConfig(),
+                )
+                val response = aiModel.generateContent(prompt)
+                val cleaned = cleanMarkdownText(response.text ?: "")
+                if (cleaned.isNotBlank()) {
+                    activeWorkingModel = modelName
+                    return@withContext cleaned
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "generateSubscriptionActionScript failed on $modelName: ${e.message}")
+                if (isQuotaOrNotFoundError(e)) {
+                    markModelQuotaExceeded(modelName)
+                }
+            }
+        }
+        return@withContext ""
     }
 }

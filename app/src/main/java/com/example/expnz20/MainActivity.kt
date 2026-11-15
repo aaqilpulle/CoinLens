@@ -1832,6 +1832,47 @@ class MainActivity : FragmentActivity() {
                                             auth.signOut()
                                             currentUser = null
                                         },
+                                        onDeleteAccountUser = {
+                                            val targetUser = auth.currentUser ?: currentUser
+                                            val userUid = targetUser?.uid
+                                            val userPrefsKey = if (userUid != null) "expnz_user_$userUid" else null
+
+                                            fun finalizeLocalCleanup() {
+                                                if (userPrefsKey != null) {
+                                                    try {
+                                                        applicationContext.getSharedPreferences(userPrefsKey, Context.MODE_PRIVATE)
+                                                            .edit().clear().apply()
+                                                    } catch (_: Exception) {}
+                                                }
+                                                auth.signOut()
+                                                currentUser = null
+                                                Toast.makeText(applicationContext, "Account deleted successfully", Toast.LENGTH_LONG).show()
+                                            }
+
+                                            if (userUid != null) {
+                                                Firebase.firestore.collection("users").document(userUid)
+                                                    .collection("wealth_data").document("main")
+                                                    .delete()
+                                                    .addOnCompleteListener {
+                                                        Firebase.firestore.collection("users").document(userUid)
+                                                            .delete()
+                                                            .addOnCompleteListener {
+                                                                targetUser?.delete()
+                                                                    ?.addOnCompleteListener { delTask ->
+                                                                        if (delTask.isSuccessful) {
+                                                                            finalizeLocalCleanup()
+                                                                        } else {
+                                                                            val err = delTask.exception?.localizedMessage ?: "Please sign out and sign back in to delete your account."
+                                                                            Toast.makeText(applicationContext, "Account deletion requires recent login: $err", Toast.LENGTH_LONG).show()
+                                                                            finalizeLocalCleanup()
+                                                                        }
+                                                                    } ?: finalizeLocalCleanup()
+                                                            }
+                                                    }
+                                            } else {
+                                                finalizeLocalCleanup()
+                                            }
+                                        },
                                         isExpanded = isExpanded,
                                         isDarkMode = isDarkMode,
                                         onDarkModeChange = { newMode ->
@@ -2244,6 +2285,7 @@ fun computeWhatIfProjection(
 fun ExpenseTrackerApp(
     currentUser: FirebaseUser,
     onSignOutUser: () -> Unit,
+    onDeleteAccountUser: () -> Unit = {},
     isExpanded: Boolean,
     isDarkMode: Boolean,
     onDarkModeChange: (Boolean) -> Unit
@@ -4972,6 +5014,7 @@ fun ExpenseTrackerApp(
                                     saveAppConfig(appConfig.copy(isSetupCompleted = false))
                                 },
                                 onSignOut = onSignOutUser,
+                                onDeleteAccount = onDeleteAccountUser,
                                 prop1Loan = prop1Loan,
                                 prop2Loan = prop2Loan,
                                 isWealthHidden = isWealthHidden,
