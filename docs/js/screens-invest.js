@@ -37,7 +37,7 @@ export function renderSuperAndSharesScreen(ctx) {
   const { state, ui } = ctx;
   const cfg = state.appConfig;
   const hide = state.isWealthHidden;
-  const sharesAccent = hexLongToCss(cfg.colorSuperSharesHex, "#FBBF24");
+  const sharesAccent = hexLongToCss(cfg.colorSuperSharesHex, "#38BDF8");
   const p1Color = hexLongToCss(cfg.person1ColorHex, "#E38391");
   const p2Color = hexLongToCss(cfg.person2ColorHex, "#34D399");
 
