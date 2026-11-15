@@ -1841,7 +1841,7 @@ class MainActivity : FragmentActivity() {
                                                 if (userPrefsKey != null) {
                                                     try {
                                                         applicationContext.getSharedPreferences(userPrefsKey, Context.MODE_PRIVATE)
-                                                            .edit().clear().apply()
+                                                            .edit { clear() }
                                                     } catch (_: Exception) {}
                                                 }
                                                 auth.signOut()
@@ -5232,6 +5232,7 @@ fun ExpenseTrackerApp(
                                 saveAppConfig(appConfig.copy(isSetupCompleted = false))
                             },
                             onSignOut = onSignOutUser,
+                            onDeleteAccount = onDeleteAccountUser,
                             prop1Loan = prop1Loan,
                             prop2Loan = prop2Loan,
                             isWealthHidden = isWealthHidden,
@@ -6593,6 +6594,7 @@ fun SettingsScreen(
     onBiometricChange: (Boolean) -> Unit,
     onRerunSetupWizard: () -> Unit,
     onSignOut: (() -> Unit)? = null,
+    onDeleteAccount: (() -> Unit)? = null,
     prop1Loan: LoanConfig = LoanConfig("Property 1", "2024-01-01", 600000.0, 30, 580000.0, 28.0, 6.15, 25000.0),
     prop2Loan: LoanConfig = LoanConfig("Property 2", "2024-01-01", 500000.0, 30, 480000.0, 28.0, 6.25, 10000.0),
     isWealthHidden: Boolean = false,
@@ -6610,6 +6612,8 @@ fun SettingsScreen(
     var showInvitePartnerDialog by remember { mutableStateOf(false) }
     var showJoinHouseholdDialog by remember { mutableStateOf(false) }
     var showLoansSubScreen by rememberSaveable { mutableStateOf(false) }
+    var showDeleteAccountStep1 by remember { mutableStateOf(false) }
+    var showDeleteAccountStep2 by remember { mutableStateOf(false) }
 
     val orbSpacing = 14.dp
     val headerTopPad = rememberHeaderAwareTopPadding(orbSpacing)
@@ -7218,27 +7222,55 @@ fun SettingsScreen(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Column {
-                        Text("Account", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                        Text(
-                            text = if (user?.email != null) "Signed in as ${user.email}" else "Signed in as Guest",
-                            fontSize = 12.sp,
-                            color = SlateGray
-                        )
-                    }
-                    Button(
-                        onClick = { onSignOut?.invoke() },
-                        colors = ButtonDefaults.buttonColors(containerColor = BrandCoralRed, contentColor = BrandForestDark),
-                        shape = RoundedCornerShape(12.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Sign Out", fontWeight = FontWeight.Bold)
+                        Column {
+                            Text("Account", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+                            Text(
+                                text = if (user?.email != null) "Signed in as ${user.email}" else "Signed in as Guest",
+                                fontSize = 12.sp,
+                                color = SlateGray
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = { onSignOut?.invoke() },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = BrandCoralRed, contentColor = BrandForestDark),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("Sign Out", fontWeight = FontWeight.Bold)
+                        }
+
+                        OutlinedButton(
+                            onClick = { showDeleteAccountStep1 = true },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.2.dp, BrandCoralRed.copy(alpha = 0.75f)),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = Color.Transparent,
+                                contentColor = BrandCoralRed
+                            )
+                        ) {
+                            Icon(Icons.Default.DeleteForever, contentDescription = null, modifier = Modifier.size(16.dp), tint = BrandCoralRed)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Delete Account", fontWeight = FontWeight.Bold, color = BrandCoralRed, fontSize = 13.sp)
+                        }
                     }
                 }
             }
@@ -7407,6 +7439,75 @@ fun SettingsScreen(
             dismissButton = {
                 TextButton(onClick = { showJoinHouseholdDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Confirmation 1 of 2: Delete Account
+    if (showDeleteAccountStep1) {
+        ConfirmDeleteDialog(
+            title = "Delete Account?",
+            message = "Are you sure you want to delete your COINLENS account (${user?.email ?: "current account"})? All your financial data, linked household settings, and preferences will be permanently wiped.",
+            onDismiss = { showDeleteAccountStep1 = false },
+            onConfirm = {
+                showDeleteAccountStep1 = false
+                showDeleteAccountStep2 = true
+            }
+        )
+    }
+
+    // Confirmation 2 of 2: Final irreversible verification
+    if (showDeleteAccountStep2) {
+        AlertDialog(
+            onDismissRequest = { showDeleteAccountStep2 = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = BrandCoralRed,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text("Final Confirmation: Delete Account", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "This action is completely permanent and cannot be undone.",
+                        fontWeight = FontWeight.SemiBold,
+                        color = BrandCoralRed
+                    )
+                    Text(
+                        text = "Your login credentials, Firestore cloud records, and local data will be erased immediately. Do you wish to proceed?",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteAccountStep2 = false
+                        onDeleteAccount?.invoke()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = BrandCoralRed,
+                        contentColor = BrandForestDark
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.DeleteForever, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Permanently Delete", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteAccountStep2 = false }) {
+                    Text("Keep Account")
                 }
             }
         )
